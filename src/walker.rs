@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -43,12 +44,14 @@ pub struct WalkContext {
     pub needs_stat: bool,
     pub empty: bool,
     pub min_depth: Option<usize>,
+    pub follow: bool,
 }
 
 struct DirTask {
     path: PathBuf,
     depth: usize,
     gitignores: Arc<Vec<Gitignore>>,
+    ancestors: Option<Arc<HashSet<(u64, u64)>>>,
 }
 
 fn find_task<T>(local: &Worker<T>, injector: &Injector<T>, stealers: &[Stealer<T>]) -> Option<T> {
@@ -111,7 +114,11 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
     });
 
     let root_path = cli.path.clone();
-    let meta = std::fs::symlink_metadata(&root_path)?;
+    let meta = if ctx.follow {
+        std::fs::metadata(&root_path)?
+    } else {
+        std::fs::symlink_metadata(&root_path)?
+    };
     let raw_type = if meta.is_dir() {
         RawType::Directory
     } else if meta.is_file() {
@@ -150,7 +157,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
             let mut is_exec = (file_mode & 0o111) != 0;
 
             if ctx.needs_stat || ctx.size_filter.is_some() || ctx.time_filter.is_some() {
-                if let Ok(file_meta) = query_statx(&root_path, true, true) {
+                if let Ok(file_meta) = query_statx(&root_path, true, true, ctx.follow) {
                     file_size = file_meta.size;
                     file_mtime = file_meta.mtime_sec;
                     file_mode = file_meta.mode;
@@ -228,11 +235,20 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
         Arc::new(Vec::new())
     };
 
+    let initial_ancestors = if ctx.follow {
+        let mut set = HashSet::new();
+        set.insert((meta.dev(), meta.ino()));
+        Some(Arc::new(set))
+    } else {
+        None
+    };
+
     let injector = Arc::new(Injector::<DirTask>::new());
     injector.push(DirTask {
         path: root_path,
         depth: 0,
         gitignores: initial_gitignores,
+        ancestors: initial_ancestors,
     });
 
     let mut workers = Vec::with_capacity(thread_count);
@@ -266,6 +282,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
         let needs_stat = ctx.needs_stat;
         let empty = ctx.empty;
         let min_depth = ctx.min_depth;
+        let follow = ctx.follow;
         let hidden = cli.hidden;
         let no_ignore = cli.no_ignore;
         let max_depth = cli.max_depth;
@@ -303,7 +320,25 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                             return Ok(());
                         }
 
-                        let is_directory = entry.raw_type == RawType::Directory;
+                        let is_symlink = entry.raw_type == RawType::Symlink;
+                        let is_native_dir = entry.raw_type == RawType::Directory;
+
+                        let (effective_raw_type, is_directory) = if follow && is_symlink {
+                            let symlink_path = task_path.join(OsStr::from_bytes(entry.name));
+                            if let Ok(target_meta) = std::fs::metadata(&symlink_path) {
+                                if target_meta.is_dir() {
+                                    (RawType::Directory, true)
+                                } else if target_meta.is_file() {
+                                    (RawType::File, false)
+                                } else {
+                                    (RawType::Other, false)
+                                }
+                            } else {
+                                (RawType::Symlink, false)
+                            }
+                        } else {
+                            (entry.raw_type, is_native_dir)
+                        };
 
                         if is_at_root_mount && is_directory && is_virtual_fs(entry.name) {
                             return Ok(());
@@ -323,7 +358,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                             }
                         }
 
-                        let match_score = matcher.matches(entry.name, entry.raw_type);
+                        let match_score = matcher.matches(entry.name, effective_raw_type);
                         let entry_matched = match_score.is_some();
 
                         if !entry_matched && !is_directory {
@@ -352,7 +387,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                             }
 
                             if let Some(cm) = &content_matcher {
-                                if entry.raw_type == RawType::File {
+                                if effective_raw_type == RawType::File {
                                     if !cm.matches_file(&child_path, &mut read_buf, &mut lower_buf)
                                     {
                                         matches_all = false;
@@ -368,7 +403,8 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                             let mut is_exec = false;
 
                             if needs_stat || size_filter.is_some() || time_filter.is_some() {
-                                if let Ok(file_meta) = query_statx(&child_path, true, true) {
+                                if let Ok(file_meta) = query_statx(&child_path, true, true, follow)
+                                {
                                     file_size = file_meta.size;
                                     file_mtime = file_meta.mtime_sec;
                                     file_mode = file_meta.mode;
@@ -390,7 +426,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                             }
 
                             if empty {
-                                match entry.raw_type {
+                                match effective_raw_type {
                                     RawType::File => {
                                         if file_size != 0 {
                                             matches_all = false;
@@ -414,7 +450,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                                 } else {
                                     let record = MatchRecord {
                                         path: child_path.clone(),
-                                        raw_type: entry.raw_type,
+                                        raw_type: effective_raw_type,
                                         size: file_size,
                                         mtime_sec: file_mtime,
                                         mode: file_mode,
@@ -436,13 +472,40 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
 
                             if can_recurse {
                                 let mut should_descend = true;
-                                if let Some(expected_dev) = root_dev {
-                                    if let Ok(child_meta) = std::fs::symlink_metadata(&child_path) {
-                                        if child_meta.dev() != expected_dev {
+
+                                let child_ancestors = if let Some(ancestors) = &task.ancestors {
+                                    if let Ok(dir_meta) = std::fs::metadata(&child_path) {
+                                        let key = (dir_meta.dev(), dir_meta.ino());
+                                        if ancestors.contains(&key) {
                                             should_descend = false;
+                                            None
+                                        } else {
+                                            let mut new_set = (**ancestors).clone();
+                                            new_set.insert(key);
+                                            Some(Arc::new(new_set))
                                         }
                                     } else {
                                         should_descend = false;
+                                        None
+                                    }
+                                } else {
+                                    None
+                                };
+
+                                if should_descend {
+                                    if let Some(expected_dev) = root_dev {
+                                        let child_meta_res = if follow {
+                                            std::fs::metadata(&child_path)
+                                        } else {
+                                            std::fs::symlink_metadata(&child_path)
+                                        };
+                                        if let Ok(child_meta) = child_meta_res {
+                                            if child_meta.dev() != expected_dev {
+                                                should_descend = false;
+                                            }
+                                        } else {
+                                            should_descend = false;
+                                        }
                                     }
                                 }
 
@@ -465,6 +528,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                                         path: child_path,
                                         depth: next_depth,
                                         gitignores: child_gitignores,
+                                        ancestors: child_ancestors,
                                     });
                                 }
                             }

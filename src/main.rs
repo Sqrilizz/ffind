@@ -24,7 +24,7 @@ use crate::cli::{Cli, SortBy};
 use crate::color::Colorizer;
 use crate::exec::CommandExecutor;
 use crate::matcher::{ContentMatcher, Matcher};
-use crate::printer::{PrinterHandle, Summary, write_record};
+use crate::printer::{PrintConfig, PrinterHandle, Summary, write_record};
 use crate::statx::{SizeFilter, TimeFilter};
 use crate::walker::{MatchRecord, WalkContext};
 
@@ -60,7 +60,12 @@ fn main() -> Result<()> {
         .transpose()?;
 
     let root_dev = if cli.one_file_system {
-        std::fs::symlink_metadata(&cli.path).ok().map(|m| m.dev())
+        let meta_res = if cli.follow {
+            std::fs::metadata(&cli.path)
+        } else {
+            std::fs::symlink_metadata(&cli.path)
+        };
+        meta_res.ok().map(|m| m.dev())
     } else {
         None
     };
@@ -76,7 +81,7 @@ fn main() -> Result<()> {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let match_counter = Arc::new(AtomicUsize::new(0));
 
-    let needs_stat = cli.long || cli.sort.is_some() || cli.summary || cli.empty;
+    let needs_stat = cli.long || cli.sort.is_some() || cli.summary || cli.empty || cli.json;
 
     let ctx = WalkContext {
         matcher,
@@ -91,19 +96,24 @@ fn main() -> Result<()> {
         needs_stat,
         empty: cli.empty,
         min_depth: cli.min_depth,
+        follow: cli.follow,
     };
 
     let needs_collection = cli.sort.is_some() || cli.exec_batch.is_some();
 
     let printer_handle = if !needs_collection {
+        let print_config = PrintConfig {
+            long: cli.long,
+            json: cli.json,
+            print0: cli.print0,
+            limit: cli.limit,
+            summary: cli.summary,
+        };
         Some(PrinterHandle::new(
             receiver.clone(),
             Arc::clone(&stop_flag),
             Arc::clone(&colorizer),
-            cli.long,
-            cli.print0,
-            cli.limit,
-            cli.summary,
+            print_config,
         ))
     } else {
         None
@@ -186,7 +196,14 @@ fn main() -> Result<()> {
                 if let Some(s) = &mut summary {
                     s.update(record);
                 }
-                let _ = write_record(&mut writer, record, &colorizer, cli.long, delimiter);
+                let _ = write_record(
+                    &mut writer,
+                    record,
+                    &colorizer,
+                    cli.long,
+                    cli.json,
+                    delimiter,
+                );
             }
         }
 

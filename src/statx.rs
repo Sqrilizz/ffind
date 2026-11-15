@@ -1,16 +1,9 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-pub struct FileMeta {
-    pub size: u64,
-    pub mtime_sec: i64,
-    pub mode: u32,
-    pub is_executable: bool,
-}
-
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SizeFilter {
     Greater(u64),
     Less(u64),
@@ -18,113 +11,117 @@ pub enum SizeFilter {
 }
 
 impl SizeFilter {
-    pub fn parse(input: &str) -> Result<Self> {
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            bail!("empty size filter");
+    pub fn parse(s: &str) -> Result<Self> {
+        let s = s.trim();
+        if s.is_empty() {
+            anyhow::bail!("empty size filter");
         }
 
-        let (sign, rest) = if let Some(stripped) = trimmed.strip_prefix('+') {
-            (Some('+'), stripped)
-        } else if let Some(stripped) = trimmed.strip_prefix('-') {
-            (Some('-'), stripped)
+        let (prefix, rest) = if let Some(stripped) = s.strip_prefix('+') {
+            ('+', stripped)
+        } else if let Some(stripped) = s.strip_prefix('-') {
+            ('-', stripped)
         } else {
-            (None, trimmed)
+            ('=', s)
         };
 
-        let last_char = rest.chars().last().context("empty size string")?;
-        let (number_str, multiplier) = if last_char.is_ascii_alphabetic() {
-            let num = &rest[..rest.len() - last_char.len_utf8()];
-            let mult = match last_char.to_ascii_uppercase() {
-                'B' => 1u64,
-                'K' => 1024u64,
-                'M' => 1024u64 * 1024,
-                'G' => 1024u64 * 1024 * 1024,
-                'T' => 1024u64 * 1024 * 1024 * 1024,
-                _ => bail!("unknown size unit: {last_char}"),
-            };
-            (num, mult)
-        } else {
-            (rest, 1u64)
-        };
+        let (num_str, unit) = rest.split_at(
+            rest.find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len()),
+        );
 
-        let number: u64 = number_str
-            .trim()
+        let value: u64 = num_str
             .parse()
-            .context("invalid number in size filter")?;
-        let bytes = number
-            .checked_mul(multiplier)
-            .context("size value overflow")?;
+            .with_context(|| format!("invalid number in size filter: '{num_str}'"))?;
 
-        match sign {
-            Some('+') => Ok(Self::Greater(bytes)),
-            Some('-') => Ok(Self::Less(bytes)),
-            _ => Ok(Self::Exact(bytes)),
+        let multiplier: u64 = match unit.to_ascii_uppercase().as_str() {
+            "" | "B" | "C" => 1,
+            "K" | "KB" | "KIB" => 1024,
+            "M" | "MB" | "MIB" => 1024 * 1024,
+            "G" | "GB" | "GIB" => 1024 * 1024 * 1024,
+            "T" | "TB" | "TIB" => 1024 * 1024 * 1024 * 1024,
+            other => anyhow::bail!("unknown size unit: '{other}'"),
+        };
+
+        let total_bytes = value
+            .checked_mul(multiplier)
+            .context("size filter overflow")?;
+
+        match prefix {
+            '+' => Ok(Self::Greater(total_bytes)),
+            '-' => Ok(Self::Less(total_bytes)),
+            _ => Ok(Self::Exact(total_bytes)),
         }
     }
 
+    #[inline]
     pub fn matches(&self, actual_size: u64) -> bool {
         match *self {
             Self::Greater(threshold) => actual_size > threshold,
             Self::Less(threshold) => actual_size < threshold,
-            Self::Exact(target) => actual_size == target,
+            Self::Exact(threshold) => actual_size == threshold,
         }
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeFilter {
     Newer(i64),
     Older(i64),
 }
 
 impl TimeFilter {
-    pub fn parse(input: &str, now_sec: i64) -> Result<Self> {
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            bail!("empty time filter");
+    pub fn parse(s: &str, now_sec: i64) -> Result<Self> {
+        let s = s.trim();
+        if s.is_empty() {
+            anyhow::bail!("empty time filter");
         }
 
-        let (sign, rest) = if let Some(stripped) = trimmed.strip_prefix('+') {
-            (Some('+'), stripped)
-        } else if let Some(stripped) = trimmed.strip_prefix('-') {
-            (Some('-'), stripped)
+        let (prefix, rest) = if let Some(stripped) = s.strip_prefix('+') {
+            ('+', stripped)
+        } else if let Some(stripped) = s.strip_prefix('-') {
+            ('-', stripped)
         } else {
-            (None, trimmed)
+            ('-', s)
         };
 
-        let last_char = rest.chars().last().context("empty time string")?;
-        let (number_str, multiplier_sec) = if last_char.is_ascii_alphabetic() {
-            let num = &rest[..rest.len() - last_char.len_utf8()];
-            let mult = match last_char.to_ascii_lowercase() {
-                's' => 1i64,
-                'm' => 60i64,
-                'h' => 3600i64,
-                'd' => 86400i64,
-                'w' => 7 * 86400i64,
-                _ => bail!("unknown time unit: {last_char}"),
-            };
-            (num, mult)
-        } else {
-            (rest, 1i64)
-        };
+        let (num_str, unit) = rest.split_at(
+            rest.find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len()),
+        );
 
-        let count: i64 = number_str
-            .trim()
+        let value: i64 = num_str
             .parse()
-            .context("invalid number in time filter")?;
-        let offset_sec = count
-            .checked_mul(multiplier_sec)
-            .context("time value overflow")?;
-        let threshold = now_sec - offset_sec;
+            .with_context(|| format!("invalid number in time filter: '{num_str}'"))?;
 
-        match sign {
-            Some('+') => Ok(Self::Older(threshold)),
-            Some('-') => Ok(Self::Newer(threshold)),
+        let unit_lower = unit.to_ascii_lowercase();
+        let seconds_per_unit: i64 = match unit {
+            "M" => 30 * 86400,
+            _ => match unit_lower.as_str() {
+                "" | "s" => 1,
+                "m" => 60,
+                "h" => 3600,
+                "d" => 86400,
+                "w" => 7 * 86400,
+                "mo" => 30 * 86400,
+                "y" => 365 * 86400,
+                other => anyhow::bail!("unknown time unit: '{other}'"),
+            },
+        };
+
+        let duration_sec = value
+            .checked_mul(seconds_per_unit)
+            .context("time filter overflow")?;
+
+        let threshold = now_sec.saturating_sub(duration_sec);
+
+        match prefix {
+            '+' => Ok(Self::Older(threshold)),
             _ => Ok(Self::Newer(threshold)),
         }
     }
 
+    #[inline]
     pub fn matches(&self, actual_mtime_sec: i64) -> bool {
         match *self {
             Self::Newer(threshold) => actual_mtime_sec >= threshold,
@@ -133,7 +130,19 @@ impl TimeFilter {
     }
 }
 
-pub fn query_statx(path: &Path, need_size: bool, need_mtime: bool) -> Result<FileMeta> {
+pub struct FileMeta {
+    pub size: u64,
+    pub mtime_sec: i64,
+    pub mode: u32,
+    pub is_executable: bool,
+}
+
+pub fn query_statx(
+    path: &Path,
+    need_size: bool,
+    need_mtime: bool,
+    follow_symlinks: bool,
+) -> Result<FileMeta> {
     let path_bytes = path.as_os_str().as_bytes();
     let c_path = CString::new(path_bytes).context("path contains null byte")?;
 
@@ -145,6 +154,12 @@ pub fn query_statx(path: &Path, need_size: bool, need_mtime: bool) -> Result<Fil
         mask |= libc::STATX_MTIME;
     }
 
+    let flags = if follow_symlinks {
+        0
+    } else {
+        libc::AT_SYMLINK_NOFOLLOW
+    };
+
     let mut statx_buf: libc::statx = unsafe { std::mem::zeroed() };
     // # Safety: c_path is a valid null-terminated C string and statx_buf pointer is aligned and valid.
     let res = unsafe {
@@ -152,7 +167,7 @@ pub fn query_statx(path: &Path, need_size: bool, need_mtime: bool) -> Result<Fil
             libc::SYS_statx,
             libc::AT_FDCWD,
             c_path.as_ptr(),
-            libc::AT_SYMLINK_NOFOLLOW,
+            flags,
             mask,
             &mut statx_buf as *mut libc::statx,
         )
@@ -206,11 +221,14 @@ mod tests {
         assert_eq!(filter_older, TimeFilter::Older(now - 7 * 86400));
         assert!(filter_older.matches(now - 10 * 86400));
         assert!(!filter_older.matches(now - 2 * 86400));
+
+        let filter_month = TimeFilter::parse("-1M", now).unwrap();
+        assert_eq!(filter_month, TimeFilter::Newer(now - 30 * 86400));
     }
 
     #[test]
     fn test_query_statx_current_file() {
-        let meta = query_statx(Path::new("Cargo.toml"), true, true).unwrap();
+        let meta = query_statx(Path::new("Cargo.toml"), true, true, false).unwrap();
         assert!(meta.size > 0);
         assert!(meta.mtime_sec > 0);
         assert!(meta.mode > 0);

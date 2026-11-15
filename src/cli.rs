@@ -97,6 +97,15 @@ pub struct Cli {
     #[arg(short = 'H', long = "hidden")]
     pub hidden: bool,
 
+    #[arg(short = 'a', long = "absolute-path")]
+    pub absolute_path: bool,
+
+    #[arg(short = 'L', long = "follow")]
+    pub follow: bool,
+
+    #[arg(long = "json")]
+    pub json: bool,
+
     #[arg(long = "min-depth", value_name = "NUM")]
     pub min_depth: Option<usize>,
 
@@ -142,6 +151,11 @@ impl Cli {
                     self.path = PathBuf::from(p);
                     self.pattern = None;
                 }
+            }
+        }
+        if self.absolute_path {
+            if let Ok(abs) = std::path::absolute(&self.path) {
+                self.path = abs;
             }
         }
         if self.fuzzy && self.sort.is_none() {

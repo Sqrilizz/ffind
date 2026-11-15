@@ -150,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_batch_placeholder() {
-        let executor = CommandExecutor::new(vec!["echo".to_string(), "{}".to_string()]);
+        let executor = CommandExecutor::new(vec!["true".to_string(), "{}".to_string()]);
         let paths = vec![PathBuf::from("a.txt"), PathBuf::from("b.txt")];
         assert!(executor.execute_batch(&paths).is_ok());
     }

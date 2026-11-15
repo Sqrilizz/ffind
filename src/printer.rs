@@ -1,6 +1,6 @@
 use crossbeam_channel::Receiver;
 use std::io::{self, BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
@@ -12,13 +12,61 @@ use crate::walker::MatchRecord;
 
 const PRINTER_BUF_SIZE: usize = 131072;
 
+#[derive(Clone, Copy, Debug)]
+pub struct PrintConfig {
+    pub long: bool,
+    pub json: bool,
+    pub print0: bool,
+    pub limit: Option<usize>,
+    pub summary: bool,
+}
+
+#[derive(serde::Serialize)]
+struct JsonRecord<'a> {
+    path: &'a Path,
+    #[serde(rename = "type")]
+    raw_type: &'static str,
+    size: u64,
+    mtime: i64,
+    mode: u32,
+    is_exec: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    score: Option<i32>,
+}
+
 pub fn write_record<W: Write>(
     writer: &mut W,
     record: &MatchRecord,
     colorizer: &Colorizer,
     long: bool,
+    json: bool,
     delimiter: u8,
 ) -> io::Result<()> {
+    if json {
+        let raw_type = match record.raw_type {
+            RawType::File => "file",
+            RawType::Directory => "directory",
+            RawType::Symlink => "symlink",
+            RawType::Other => "other",
+        };
+        let json_record = JsonRecord {
+            path: &record.path,
+            raw_type,
+            size: record.size,
+            mtime: record.mtime_sec,
+            mode: record.mode,
+            is_exec: record.is_exec,
+            score: if record.score != 0 {
+                Some(record.score)
+            } else {
+                None
+            },
+        };
+        serde_json::to_writer(&mut *writer, &json_record).map_err(io::Error::other)?;
+        writer.write_all(&[delimiter])?;
+        return Ok(());
+    }
+
     if long {
         let mode_str = format_mode(record.mode, record.raw_type);
         let size_str = format_size(record.size, record.raw_type);
@@ -124,17 +172,14 @@ impl PrinterHandle {
         receiver: Receiver<MatchRecord>,
         stop_flag: Arc<AtomicBool>,
         colorizer: Arc<Colorizer>,
-        long: bool,
-        print0: bool,
-        limit: Option<usize>,
-        collect_summary: bool,
+        config: PrintConfig,
     ) -> Self {
         let handle = thread::spawn(move || -> io::Result<Option<Summary>> {
             let stdout = io::stdout();
             let mut writer = BufWriter::with_capacity(PRINTER_BUF_SIZE, stdout.lock());
-            let delimiter = if print0 { b'\0' } else { b'\n' };
+            let delimiter = if config.print0 { b'\0' } else { b'\n' };
             let mut count = 0usize;
-            let mut summary = if collect_summary {
+            let mut summary = if config.summary {
                 Some(Summary::new())
             } else {
                 None
@@ -149,7 +194,14 @@ impl PrinterHandle {
                     s.update(&record);
                 }
 
-                if let Err(err) = write_record(&mut writer, &record, &colorizer, long, delimiter) {
+                if let Err(err) = write_record(
+                    &mut writer,
+                    &record,
+                    &colorizer,
+                    config.long,
+                    config.json,
+                    delimiter,
+                ) {
                     if err.kind() == io::ErrorKind::BrokenPipe {
                         stop_flag.store(true, Ordering::Relaxed);
                         return Ok(summary);
@@ -159,7 +211,7 @@ impl PrinterHandle {
 
                 count += 1;
 
-                if let Some(max) = limit {
+                if let Some(max) = config.limit {
                     if count >= max {
                         stop_flag.store(true, Ordering::Relaxed);
                         break;
@@ -237,5 +289,26 @@ mod tests {
             summary.largest_file,
             Some((PathBuf::from("file2.txt"), 5000))
         );
+    }
+
+    #[test]
+    fn test_write_record_json() {
+        let mut output = Vec::new();
+        let record = MatchRecord {
+            path: PathBuf::from("src/main.rs"),
+            raw_type: RawType::File,
+            size: 1234,
+            mtime_sec: 1700000000,
+            mode: 0o100644,
+            is_exec: false,
+            score: 0,
+        };
+        let colorizer = Colorizer::new(crate::color::ColorMode::Never);
+        assert!(write_record(&mut output, &record, &colorizer, false, true, b'\n').is_ok());
+
+        let line = String::from_utf8(output).unwrap();
+        assert!(line.contains("\"path\":\"src/main.rs\""));
+        assert!(line.contains("\"type\":\"file\""));
+        assert!(line.contains("\"size\":1234"));
     }
 }

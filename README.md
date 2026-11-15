@@ -6,10 +6,12 @@ Designed as a fast, modern alternative to `find` with work-stealing concurrency,
 
 ## Features
 
-- **Work-Stealing Concurrency:** Parallel directory traversal powered by `crossbeam-deque` and thread pools scaled to CPU cores.
+- **Work-Stealing Concurrency:** Parallel directory traversal powered by `crossbeam-deque` and thread pools scaled to CPU cores (configurable with `-j, --threads`).
 - **Direct Syscalls:** Uses Linux `getdents64` directly instead of libc `readdir` wrappers; lazy `statx` calls only when metadata filters or long listings are requested.
 - **Hierarchical .gitignore & Smart Defaults:** Automatically respects root and nested `.gitignore` files, while ignoring VCS folders (`.git`, `.hg`, `.svn`), dependency trees (`node_modules`, `target`, `.cargo`, `.gradle`), and virtual filesystems (`/proc`, `/sys`, `/dev`, `/run`) unless `--no-ignore` is passed.
-- **Zero-Allocation Fuzzy Engine:** $O(N)$ greedy subsequence matching with word boundary bonuses and consecutive match weighting (`-z`, `--fuzzy`), sorted by relevance score by default.
+- **Cycle-Safe Symlink Following:** Follow symbolic links (`-L, --follow`) with lock-free ancestor cycle detection, preventing infinite directory recursion.
+- **Absolute Paths & JSON Streaming:** Output absolute paths (`-a, --absolute-path`) and streaming JSON objects (`--json`) for automated pipelines and AI agent workflows.
+- **Zero-Allocation Fuzzy Engine:** $O(N)$ greedy subsequence matching with word boundary bonuses and consecutive match weighting (`-z`, `--fuzzy`), sorted by relevance score by default. Hot-path matching uses stack buffers without heap allocations.
 - **Fast Extension Filtering:** Match single or multiple file extensions (`-e, --extension rs,toml`) in $O(1)$ without heap allocations.
 - **Flexible Pattern Matching:** Substring, exact match (`-x`), globs (`-g`), regular expressions (`-r`), and file content inspection (`-C`).
 - **Metadata Filters:** Filter by file size (`--size`), modification age (`--changed`), empty files/directories (`--empty`), entry type (`-t`), and depth bounds (`--min-depth`, `--max-depth`).
@@ -39,7 +41,7 @@ hyperfine --warmup 3 'ffind -e h /usr/include' 'fd -e h "" /usr/include' 'find /
 ```
 
 | Tool | Mean Wall Time [ms] | Relative Speed |
-|:---|---:|:---|
+|:---|---:|---:|
 | **`ffind`** | **11.1 ± 0.9** | **fastest** |
 | `fd` | 13.9 ± 1.2 | 1.25x slower |
 | `find` | 28.0 ± 0.6 | 2.5x slower |
@@ -87,14 +89,14 @@ ffind -z crgtoml
 # Search by extension
 ffind -e rs,toml
 
-# Search within a specific path
-ffind main.rs src/
+# Output absolute paths
+ffind -a main.rs
 
-# Search only directories
-ffind -t d target
+# Stream matches as JSON
+ffind --json -m 1
 
-# Search files containing text inside
-ffind -C "fn main" -t f
+# Follow directory symlinks
+ffind -L target.txt
 ```
 
 ## Usage & Options
@@ -117,8 +119,9 @@ ffind -C "fn main" -t f
 | Flag | Description | Example |
 |------|-------------|---------|
 | `-t, --type <f\|d\|l>` | Entry type (`f` file, `d` directory, `l` symlink) | `ffind -t f` |
+| `-L, --follow` | Follow symbolic links to directories (with cycle prevention) | `ffind -L` |
 | `--size <SIZE>` | Filter by size (`+10M`, `-500k`, `1G`) | `ffind --size +10M` |
-| `--changed <DURATION>` | Filter by modification time (`-24h`, `-7d`, `+30m`) | `ffind --changed -2h` |
+| `--changed <DURATION>` | Filter by modification time (`-24h`, `-7d`, `+30m`, `-1M`) | `ffind --changed -2h` |
 | `--empty` | Match empty files (size 0) and empty directories | `ffind --empty` |
 | `-E, --exclude <PATTERN>` | Exclude entries matching substring/name | `ffind -E tests` |
 | `--min-depth <NUM>` | Minimum directory recursion depth | `ffind --min-depth 2` |
@@ -131,11 +134,14 @@ ffind -C "fn main" -t f
 
 | Flag | Description |
 |------|-------------|
+| `-a, --absolute-path` | Format matching paths as absolute paths |
+| `--json` | Output matches as streaming JSON lines |
 | `-l, --long` | Detailed listing: permissions, size, modification time, colored path |
 | `--summary` | Print summary statistics to `stderr` (count, total size, largest, average) |
 | `--sort <size\|mtime\|name\|score>` | Sort collected results (score sorts by fuzzy relevance) |
 | `-R, --reverse` | Reverse sorting order |
-| `--limit <NUM>` | Limit number of results |
+| `--limit <NUM>` | Limit number of results (stops traversal early) |
+| `-j, --threads <NUM>` | Set number of worker threads (default: available CPU cores) |
 | `-0, --print0` | Delimit results with a null byte (for `xargs -0`) |
 | `--color <auto\|always\|never>` | Control colored output (respects `LS_COLORS`) |
 | `--time` | Measure execution time and matched count (outputs to `stderr`) |
@@ -156,22 +162,15 @@ Fuzzy searches automatically rank results by best matching score. You can also e
 ffind -z toml --reverse
 ```
 
-### Extension Filtering
+### Absolute Paths & JSON Streaming
 ```bash
-# Find all Rust and TOML files
-ffind -e rs,toml
+# Absolute paths
+ffind -a main.rs
+# /home/sqrilizz/Documents/justunnyproject/src/main.rs
 
-# Combine with content search
-ffind -e rs -C "struct Cli"
-```
-
-### Empty Files and Folders
-```bash
-# Find all empty files and directories
-ffind --empty
-
-# Find only empty directories
-ffind -t d --empty
+# JSON streaming output
+ffind --json -m 1 Cargo.toml
+# {"path":"./Cargo.toml","type":"file","size":506,"mtime":1794768968,"mode":33188,"is_exec":false}
 ```
 
 ### Summary Statistics
@@ -225,10 +224,11 @@ ffind --min-depth 2 --sort mtime --limit 10
 ## Architecture
 
 1. **Kernel-Level Directory Traversal:** `ffind` bypasses the standard library's `fs::read_dir` to read raw directory entries using `libc::syscall(SYS_getdents64, ...)`. This avoids multiple allocations per directory entry.
-2. **Lazy Statx:** File attributes (size, mode, mtime) are queried through `statx(2)` with minimal mask flags, and only when `--long`, `--sort`, `--size`, `--changed`, `--empty`, or `--summary` are active.
+2. **Lazy Statx:** File attributes (size, mode, mtime) are queried through `statx(2)` with minimal mask flags, and only when `--long`, `--sort`, `--size`, `--changed`, `--empty`, `--json`, or `--summary` are active.
 3. **Lock-Free Work Stealing:** Traversal workers maintain individual deques (`crossbeam-deque`). Threads steal tasks when idle, ensuring uniform core saturation across unbalanced directory structures.
 4. **Hierarchical Ignore Stack:** When traversing subdirectories, nested `.gitignore` rules are evaluated in thread-safe, stack-propagated structures without locks.
-5. **Zero-Allocation Search Engines:** Subsequence fuzzy search and case-insensitive string matching operate strictly on stack buffers with SIMD acceleration (`memchr`), completely eliminating per-entry heap allocations.
+5. **Zero-Allocation Hot Path:** Subsequence fuzzy search and case-insensitive string matching operate strictly on stack buffers with SIMD acceleration (`memchr`), completely eliminating per-entry heap allocations in matcher loops.
+6. **Ancestor Cycle Detection:** Symbolic link following tracks active branch directory inodes, enabling full traversal while preventing infinite loops without global lock contention.
 
 ## License
 
