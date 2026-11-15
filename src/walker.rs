@@ -42,9 +42,8 @@ pub struct WalkContext {
     pub exclude: Arc<Vec<String>>,
     pub root_dev: Option<u64>,
     pub executor: Option<Arc<CommandExecutor>>,
-    pub limit: Option<usize>,
     pub needs_lines: bool,
-    pub needs_hash: bool,
+    pub hash_max_size: Option<u64>,
     pub stop_flag: Arc<AtomicBool>,
     pub match_counter: Arc<AtomicUsize>,
     pub needs_stat: bool,
@@ -96,7 +95,7 @@ struct EntryFilters {
     time_filter: Option<TimeFilter>,
     needs_stat: bool,
     needs_lines: bool,
-    needs_hash: bool,
+    hash_max_size: Option<u64>,
     empty: bool,
     follow: bool,
 }
@@ -244,19 +243,8 @@ impl EntryEvaluator {
             }
         }
 
-        let mut lines = None;
-        if matches_all && self.filters.needs_lines {
-            lines = Some(if raw_type == RawType::File {
-                self.count_lines(path)
-            } else {
-                0
-            });
-        }
-
-        let mut crc32 = None;
-        if matches_all && self.filters.needs_hash && raw_type == RawType::File {
-            crc32 = self.hash_file(path);
-        }
+        let lines = None;
+        let crc32 = None;
 
         if matches_all {
             Some(EntryStats {
@@ -272,6 +260,25 @@ impl EntryEvaluator {
             None
         }
     }
+
+    /// Runs the expensive per-file work (content reads for `--lines` and
+    /// `--hash`). Must only be called after a limit slot was reserved, so
+    /// `--limit` never pays for files that will not be emitted.
+    fn fill_heavy(&mut self, stats: &mut EntryStats, raw_type: RawType, path: &Path) {
+        if raw_type != RawType::File {
+            return;
+        }
+
+        if self.filters.needs_lines {
+            stats.lines = Some(self.count_lines(path));
+        }
+
+        if let Some(max_size) = self.filters.hash_max_size {
+            if stats.size <= max_size {
+                stats.crc32 = self.hash_file(path);
+            }
+        }
+    }
 }
 
 struct MatchSink<'a> {
@@ -283,11 +290,12 @@ struct MatchSink<'a> {
 }
 
 impl MatchSink<'_> {
-    fn emit(&self, path: &Path, raw_type: RawType, stats: EntryStats) {
-        if !acquire_match_slot(self.counter, self.stop_flag, self.limit) {
-            return;
-        }
+    /// Reserves an emit slot before any expensive work runs.
+    fn acquire(&self) -> bool {
+        acquire_match_slot(self.counter, self.stop_flag, self.limit)
+    }
 
+    fn emit(&self, path: &Path, raw_type: RawType, stats: EntryStats) {
         if let Some(exec) = self.executor {
             let _ = exec.execute(path);
             return;
@@ -385,7 +393,11 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
         RawType::Other
     };
 
-    let walker_limit = if ctx.executor.is_some() { ctx.limit } else { None };
+    let walker_limit = if cli.sort.is_some() || cli.exec_batch.is_some() || cli.tree {
+        None
+    } else {
+        cli.limit
+    };
 
     let filters = EntryFilters {
         min_depth: ctx.min_depth,
@@ -394,7 +406,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
         time_filter: ctx.time_filter,
         needs_stat: ctx.needs_stat,
         needs_lines: ctx.needs_lines,
-        needs_hash: ctx.needs_hash,
+        hash_max_size: ctx.hash_max_size,
         empty: ctx.empty,
         follow: ctx.follow,
     };
@@ -411,10 +423,13 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
     if let Some(name) = root_path.file_name() {
         let match_score = ctx.matcher.matches(name.as_bytes(), raw_type);
 
-        if let Some(stats) =
+        if let Some(mut stats) =
             root_evaluator.evaluate(match_score, raw_type, &root_path, 0, meta.permissions().mode())
         {
-            root_sink.emit(&root_path, raw_type, stats);
+            if root_sink.acquire() {
+                root_evaluator.fill_heavy(&mut stats, raw_type, &root_path);
+                root_sink.emit(&root_path, raw_type, stats);
+            }
         }
     }
 
@@ -589,14 +604,17 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                         }
 
                         if entry_matched {
-                            if let Some(stats) = evaluator.evaluate(
+                            if let Some(mut stats) = evaluator.evaluate(
                                 match_score,
                                 effective_raw_type,
                                 &child_path,
                                 next_depth,
                                 0,
                             ) {
-                                sink.emit(&child_path, effective_raw_type, stats);
+                                if sink.acquire() {
+                                    evaluator.fill_heavy(&mut stats, effective_raw_type, &child_path);
+                                    sink.emit(&child_path, effective_raw_type, stats);
+                                }
                             }
                         }
 

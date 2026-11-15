@@ -31,7 +31,9 @@ use crate::color::Colorizer;
 use crate::exec::CommandExecutor;
 use crate::matcher::{ContentMatcher, Matcher};
 use crate::printer::{PrintConfig, PrinterHandle, Summary, write_record};
-use crate::statx::{SizeFilter, TimeFilter};
+use crate::statx::{SizeFilter, TimeFilter, parse_size_bytes};
+
+const DEFAULT_HASH_MAX_SIZE_BYTES: u64 = 1024 * 1024 * 1024;
 use crate::walker::{MatchRecord, WalkContext};
 
 fn main() -> Result<()> {
@@ -93,6 +95,15 @@ fn main() -> Result<()> {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let match_counter = Arc::new(AtomicUsize::new(0));
 
+    let hash_max_size = if cli.hash {
+        Some(match cli.hash_max_size.as_deref() {
+            Some(spec) => parse_size_bytes(spec)?,
+            None => DEFAULT_HASH_MAX_SIZE_BYTES,
+        })
+    } else {
+        None
+    };
+
     let needs_stat =
         cli.long || cli.sort.is_some() || cli.summary || cli.empty || cli.json || cli.hash;
     let needs_lines = cli.lines || cli.sort == Some(SortBy::Lines);
@@ -105,9 +116,8 @@ fn main() -> Result<()> {
         exclude,
         root_dev,
         executor,
-        limit: cli.limit,
         needs_lines,
-        needs_hash: cli.hash,
+        hash_max_size,
         stop_flag: Arc::clone(&stop_flag),
         match_counter: Arc::clone(&match_counter),
         needs_stat,

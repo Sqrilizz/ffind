@@ -201,10 +201,6 @@ impl PrinterHandle {
             };
 
             for record in receiver {
-                if stop_flag.load(Ordering::Relaxed) {
-                    break;
-                }
-
                 if let Some(s) = &mut summary {
                     s.update(&record);
                 }

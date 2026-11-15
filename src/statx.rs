@@ -3,6 +3,34 @@ use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
+/// Parses a byte size like `512`, `10K`, `500M`, `2G` into bytes.
+pub fn parse_size_bytes(s: &str) -> Result<u64> {
+    let s = s.trim();
+    if s.is_empty() {
+        anyhow::bail!("empty size");
+    }
+
+    let (num_str, unit) =
+        s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+
+    let value: u64 = num_str
+        .parse()
+        .with_context(|| format!("invalid number in size: '{num_str}'"))?;
+
+    let multiplier: u64 = match unit.to_ascii_uppercase().as_str() {
+        "" | "B" | "C" => 1,
+        "K" | "KB" | "KIB" => 1024,
+        "M" | "MB" | "MIB" => 1024 * 1024,
+        "G" | "GB" | "GIB" => 1024 * 1024 * 1024,
+        "T" | "TB" | "TIB" => 1024 * 1024 * 1024 * 1024,
+        other => anyhow::bail!("unknown size unit: '{other}'"),
+    };
+
+    value
+        .checked_mul(multiplier)
+        .context("size overflow")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SizeFilter {
     Greater(u64),
@@ -25,27 +53,7 @@ impl SizeFilter {
             ('=', s)
         };
 
-        let (num_str, unit) = rest.split_at(
-            rest.find(|c: char| !c.is_ascii_digit())
-                .unwrap_or(rest.len()),
-        );
-
-        let value: u64 = num_str
-            .parse()
-            .with_context(|| format!("invalid number in size filter: '{num_str}'"))?;
-
-        let multiplier: u64 = match unit.to_ascii_uppercase().as_str() {
-            "" | "B" | "C" => 1,
-            "K" | "KB" | "KIB" => 1024,
-            "M" | "MB" | "MIB" => 1024 * 1024,
-            "G" | "GB" | "GIB" => 1024 * 1024 * 1024,
-            "T" | "TB" | "TIB" => 1024 * 1024 * 1024 * 1024,
-            other => anyhow::bail!("unknown size unit: '{other}'"),
-        };
-
-        let total_bytes = value
-            .checked_mul(multiplier)
-            .context("size filter overflow")?;
+        let total_bytes = parse_size_bytes(rest)?;
 
         match prefix {
             '+' => Ok(Self::Greater(total_bytes)),

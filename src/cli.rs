@@ -66,8 +66,15 @@ pub struct Cli {
     )]
     pub older_than: Option<String>,
 
-    #[arg(long = "hash")]
+    #[arg(long = "hash", requires = "json")]
     pub hash: bool,
+
+    #[arg(
+        long = "hash-max-size",
+        value_name = "SIZE",
+        requires = "hash"
+    )]
+    pub hash_max_size: Option<String>,
 
     #[arg(long = "empty")]
     pub empty: bool,

@@ -501,6 +501,62 @@ fn test_hash_json() {
     let record: serde_json::Value =
         serde_json::from_str(stdout_noflag.lines().next().unwrap()).unwrap();
     assert!(record.get("crc32").is_none(), "no hash work without --hash");
+
+    let (_, _, success3) = run_ffind(&["--hash", "bin"], &dir.path);
+    assert!(!success3, "--hash without --json must be rejected");
+}
+
+#[test]
+fn test_hash_max_size_skips_large_files() {
+    let dir = TempTestDir::new("hash_cap");
+    dir.create_file("small.bin", &[b'x'; 6]);
+    dir.create_file("big.bin", &[b'x'; 8]);
+
+    let (stdout, _, success) =
+        run_ffind(&["--hash", "--hash-max-size", "6", "--json", "bin"], &dir.path);
+    assert!(success);
+    let records: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+
+    let small = records
+        .iter()
+        .find(|r| r["path"].as_str().unwrap().ends_with("small.bin"))
+        .unwrap();
+    assert!(small.get("crc32").is_some(), "file within cap must be hashed");
+
+    let big = records
+        .iter()
+        .find(|r| r["path"].as_str().unwrap().ends_with("big.bin"))
+        .unwrap();
+    assert!(big.get("crc32").is_none(), "file above cap must not be hashed");
+}
+
+#[test]
+fn test_limit_exact_with_lines_streaming() {
+    let dir = TempTestDir::new("limit_lines");
+    for i in 0..50 {
+        dir.create_file(&format!("f{:02}.txt", i), b"1\n2\n3\n");
+    }
+
+    let (stdout, _, success) =
+        run_ffind(&["--lines", "--limit", "4", "--json", "txt"], &dir.path);
+    assert!(success);
+    let records: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(
+        records.len(),
+        4,
+        "walker must stop at the limit, got: {}",
+        records.len()
+    );
+    assert!(
+        records.iter().all(|r| r["lines"].as_u64() == Some(3)),
+        "every emitted record must carry its line count"
+    );
 }
 
 #[test]

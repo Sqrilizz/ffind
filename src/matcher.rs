@@ -350,6 +350,7 @@ mod tests {
             newer_than: None,
             older_than: None,
             hash: false,
+            hash_max_size: None,
             empty: false,
             exclude: Vec::new(),
             one_file_system: false,

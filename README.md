@@ -124,7 +124,8 @@ ffind -L target.txt
 | `--changed <DURATION>` | Filter by modification time (`-24h`, `-7d`, `+30m`, `-1M`) | `ffind --changed -2h` |
 | `--newer-than <AGE\|DATE>` | Modified after an age (`2h`, `10m`, `3d`, plain seconds) or an absolute date (`2026-11-01`, `2026-11-01T15:30`) | `ffind --newer-than 1d` |
 | `--older-than <AGE\|DATE>` | Modified before an age or an absolute date (local time) | `ffind --older-than 2026-01-01` |
-| `--hash` | Compute CRC32 of matched files (adds `crc32` to `--json`; also reports `size`) | `ffind --hash --json` |
+| `--hash` | Compute CRC32 of matched files, `--json` required (adds `crc32` and `size`; files above `--hash-max-size` are skipped) | `ffind --hash --json` |
+| `--hash-max-size <SIZE>` | Skip hashing for files larger than `SIZE` (`512M`, `2G`); default `1G` | `ffind --hash --hash-max-size 100M --json` |
 | `--empty` | Match empty files (size 0) and empty directories | `ffind --empty` |
 | `-E, --exclude <PATTERN>` | Exclude entries matching substring/name | `ffind -E tests` |
 | `--min-depth <NUM>` | Minimum depth of matched entries (start point is depth 0) | `ffind --min-depth 2` |
@@ -144,11 +145,11 @@ ffind -L target.txt
 | `--lines` | Count newlines of matched files (streamed in fixed 64 KiB chunks; binary files detected by NUL in the first chunk report 0); enables `--sort lines` and adds total lines to `--summary` |
 | `--sort <size\|mtime\|name\|lines\|score>` | Sort collected results (score sorts by fuzzy relevance) |
 | `-R, --reverse` | Reverse sorting order |
-| `--limit <NUM>` | Limit number of results. Stops traversal early in streaming mode; with `--sort` or `--exec-batch` the tree is walked fully and results are cut after sorting/collection |
+| `--limit <NUM>` | Limit number of results. Stops traversal early in streaming mode; with `--sort`, `--exec-batch` or `--tree` the tree is walked fully and results are cut after sorting/collection |
 | `-j, --threads <NUM>` | Set number of worker threads (default: available CPU cores) |
 | `-0, --print0` | Delimit results with a null byte (for `xargs -0`) |
 | `--color <auto\|always\|never>` | Control colored output (respects `LS_COLORS`) |
-| `--tree` | Print matches as a minimal Unicode tree (mutually exclusive with `--json`, `-l`, `-0`, `-X`, `--exec-batch`) |
+| `--tree` | Print matches as a minimal Unicode tree (mutually exclusive with `--json`, `-l`, `-0`, `-X`, `--exec-batch`). Collects all matches in memory like `--sort`, so streaming is disabled |
 | `--time` | Measure execution time and matched count (outputs to `stderr`) |
 | `-X, --exec <CMD>...` | Execute command for each match individually (placeholders: `{}` full path, `{/}` file name, `{//}` parent dir, `{/.}` file stem) |
 | `--exec-batch <CMD>...` | Execute command once with all matching paths as arguments (append paths if no placeholder given) |
@@ -230,6 +231,8 @@ ffind --lines -e rs --sort lines --limit 5
 ffind --hash --json -e png | jq -r '[.size, .crc32, .path] | @tsv' | sort
 ```
 Identical files share the same `size` + `crc32` pair; group and compare from there.
+
+**CRC32 is a fast pre-filter, not proof of identity.** It is 32 bits wide, so on large collections collisions are statistically guaranteed (birthday paradox at roughly 2^16 files for a ~50% chance of at least one collision). Never delete files based on `crc32` alone — confirm duplicates with a byte-by-byte comparison or a strong hash such as BLAKE3 or SHA-256 first. Files larger than `--hash-max-size` (default 1 GiB) are skipped and carry no `crc32` field.
 
 ### Human-Readable Time Filters
 ```bash
