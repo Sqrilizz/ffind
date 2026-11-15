@@ -458,6 +458,42 @@ mod tests {
     }
 
     #[test]
+    fn test_fuzzy_edge_cases() {
+        // Empty needle trivially matches.
+        assert_eq!(fuzzy_score(b"", b"anything"), Some(0));
+        assert_eq!(fuzzy_score(b"", b""), Some(0));
+        // Needle longer than haystack cannot match.
+        assert!(fuzzy_score(b"toolongneedle", b"short").is_none());
+        // Exact match scores higher than spread-out match.
+        let exact = fuzzy_score(b"abc", b"abcdef").unwrap();
+        let spread = fuzzy_score(b"abc", b"axxxbxxxc").unwrap();
+        assert!(exact > spread);
+    }
+
+    #[test]
+    fn test_extension_with_dot_prefix_and_spaces() {
+        let mut cli = base_cli();
+        cli.extension = vec![".rs".to_string(), " toml ".to_string()];
+        let matcher = Matcher::from_cli(&cli).unwrap();
+        assert!(matcher.matches(b"main.rs", RawType::File).is_some());
+        assert!(matcher.matches(b"Cargo.TOML", RawType::File).is_some());
+        assert!(matcher.matches(b"main.c", RawType::File).is_none());
+        // Files without any extension must not match an extension filter.
+        assert!(matcher.matches(b"Makefile", RawType::File).is_none());
+        // Dotfile "extensions" like "gitignore" don't match rs/toml.
+        assert!(matcher.matches(b".gitignore", RawType::File).is_none());
+    }
+
+    #[test]
+    fn test_match_all_empty_pattern() {
+        let mut cli = base_cli();
+        cli.pattern = Some(String::new());
+        let matcher = Matcher::from_cli(&cli).unwrap();
+        assert!(matcher.matches(b"anything", RawType::File).is_some());
+        assert!(matcher.matches(b"src", RawType::Directory).is_some());
+    }
+
+    #[test]
     fn test_extension_filter() {
         let mut cli = base_cli();
         cli.extension = vec!["rs".to_string(), "toml".to_string()];

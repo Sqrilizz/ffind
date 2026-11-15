@@ -227,6 +227,48 @@ mod tests {
     }
 
     #[test]
+    fn test_size_filter_edge_cases() {
+        // No unit defaults to bytes.
+        assert_eq!(SizeFilter::parse("512").unwrap(), SizeFilter::Exact(512));
+        // Case-insensitive units and explicit 'B'.
+        assert_eq!(SizeFilter::parse("+2k").unwrap(), SizeFilter::Greater(2048));
+        assert_eq!(SizeFilter::parse("-4GIB").unwrap(), SizeFilter::Less(4 * 1024 * 1024 * 1024));
+        assert_eq!(SizeFilter::parse("1c").unwrap(), SizeFilter::Exact(1));
+        // Zero boundary.
+        let zero = SizeFilter::parse("0").unwrap();
+        assert!(zero.matches(0));
+        assert!(!zero.matches(1));
+        assert!(SizeFilter::parse("+0").unwrap().matches(1));
+
+        // Errors.
+        assert!(SizeFilter::parse("").is_err());
+        assert!(SizeFilter::parse("+10Z").is_err());
+        assert!(SizeFilter::parse("abc").is_err());
+        assert!(SizeFilter::parse("999999999999999999999T").is_err());
+    }
+
+    #[test]
+    fn test_time_filter_units_and_errors() {
+        let now = 1000000i64;
+        // No sign defaults to "newer than".
+        assert_eq!(TimeFilter::parse("5m", now).unwrap(), TimeFilter::Newer(now - 300));
+        assert_eq!(TimeFilter::parse("1w", now).unwrap(), TimeFilter::Newer(now - 7 * 86400));
+        assert_eq!(TimeFilter::parse("1y", now).unwrap(), TimeFilter::Newer(now - 365 * 86400));
+        // 'M' (capital) means months, 'm' means minutes.
+        assert_eq!(TimeFilter::parse("2M", now).unwrap(), TimeFilter::Newer(now - 2 * 30 * 86400));
+        assert_eq!(TimeFilter::parse("2m", now).unwrap(), TimeFilter::Newer(now - 120));
+        // Case-insensitive units.
+        assert_eq!(TimeFilter::parse("+24H", now).unwrap(), TimeFilter::Older(now - 86400));
+        assert_eq!(TimeFilter::parse("+3D", now).unwrap(), TimeFilter::Older(now - 3 * 86400));
+
+        // Errors.
+        assert!(TimeFilter::parse("", now).is_err());
+        assert!(TimeFilter::parse("-5x", now).is_err());
+        assert!(TimeFilter::parse("-h", now).is_err());
+        assert!(TimeFilter::parse("99999999999999999999d", now).is_err());
+    }
+
+    #[test]
     fn test_query_statx_current_file() {
         let meta = query_statx(Path::new("Cargo.toml"), true, true, false).unwrap();
         assert!(meta.size > 0);
