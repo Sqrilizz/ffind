@@ -16,6 +16,34 @@ Designed as a fast, modern alternative to `find` with work-stealing concurrency,
 - **Pipeline-Safe Summary:** `--summary` aggregates counts, total size, largest file, and average size to `stderr`, keeping `stdout` clean for pipelines.
 - **Execution & Integration:** Single command execution (`-X`), batch command execution (`--exec-batch`), shell completions generator (`--generate-completions`), null-byte delimiter (`-0`), and multi-criteria sorting (`--sort <size|mtime|name|score>`).
 
+## Benchmarks
+
+Benchmarked with [`hyperfine`](https://github.com/sharkdp/hyperfine) on Linux x86_64 across system trees with warm cache (`--warmup 3`).
+
+### 1. Substring search in `/usr/share` (~300,000 files)
+
+```bash
+hyperfine --warmup 3 'ffind python /usr/share' 'fd python /usr/share' 'find /usr/share -iname "*python*"'
+```
+
+| Tool | Mean Wall Time [ms] | Memory Peak | Relative Speed |
+|:---|---:|---:|:---|
+| **`ffind`** | **16.4 ± 1.2** | **6.5 MiB** | **fastest** |
+| `fd` | 51.3 ± 3.8 | 74.2 MiB | 3.1x slower (11.4x more RAM) |
+| `find` | 181.0 ± 3.8 | 10.0 MiB | 11.0x slower |
+
+### 2. Extension search in `/usr/include` (`-e h`)
+
+```bash
+hyperfine --warmup 3 'ffind -e h /usr/include' 'fd -e h "" /usr/include' 'find /usr/include -name "*.h"'
+```
+
+| Tool | Mean Wall Time [ms] | Relative Speed |
+|:---|---:|:---|
+| **`ffind`** | **11.1 ± 0.9** | **fastest** |
+| `fd` | 13.9 ± 1.2 | 1.25x slower |
+| `find` | 28.0 ± 0.6 | 2.5x slower |
+
 ## Installation
 
 ### Prerequisites
@@ -200,7 +228,7 @@ ffind --min-depth 2 --sort mtime --limit 10
 2. **Lazy Statx:** File attributes (size, mode, mtime) are queried through `statx(2)` with minimal mask flags, and only when `--long`, `--sort`, `--size`, `--changed`, `--empty`, or `--summary` are active.
 3. **Lock-Free Work Stealing:** Traversal workers maintain individual deques (`crossbeam-deque`). Threads steal tasks when idle, ensuring uniform core saturation across unbalanced directory structures.
 4. **Hierarchical Ignore Stack:** When traversing subdirectories, nested `.gitignore` rules are evaluated in thread-safe, stack-propagated structures without locks.
-5. **Zero-Allocation Fuzzy Engine:** Greedy matching passes through the byte stream in a single pass ($O(N)$), accumulating scores with bonuses for word boundaries (`_`, `-`, `.`, `/`) and consecutive matches without intermediate strings or vectors.
+5. **Zero-Allocation Search Engines:** Subsequence fuzzy search and case-insensitive string matching operate strictly on stack buffers with SIMD acceleration (`memchr`), completely eliminating per-entry heap allocations.
 
 ## License
 

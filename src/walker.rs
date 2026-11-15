@@ -313,6 +313,23 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                             return Ok(());
                         }
 
+                        if !exclude.is_empty() {
+                            let entry_name_str =
+                                std::str::from_utf8(entry.name).unwrap_or_default();
+                            for ex in exclude.iter() {
+                                if entry_name_str.contains(ex.as_str()) {
+                                    return Ok(());
+                                }
+                            }
+                        }
+
+                        let match_score = matcher.matches(entry.name, entry.raw_type);
+                        let entry_matched = match_score.is_some();
+
+                        if !entry_matched && !is_directory {
+                            return Ok(());
+                        }
+
                         let child_path = task_path.join(OsStr::from_bytes(entry.name));
 
                         if !no_ignore && !task.gitignores.is_empty() {
@@ -325,148 +342,130 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                             }
                         }
 
-                        let entry_name_str = std::str::from_utf8(entry.name).unwrap_or_default();
-                        for ex in exclude.iter() {
-                            if entry_name_str.contains(ex.as_str()) {
-                                return Ok(());
+                        if entry_matched {
+                            let mut matches_all = true;
+
+                            if let Some(min) = min_depth {
+                                if next_depth < min {
+                                    matches_all = false;
+                                }
+                            }
+
+                            if let Some(cm) = &content_matcher {
+                                if entry.raw_type == RawType::File {
+                                    if !cm.matches_file(&child_path, &mut read_buf, &mut lower_buf)
+                                    {
+                                        matches_all = false;
+                                    }
+                                } else {
+                                    matches_all = false;
+                                }
+                            }
+
+                            let mut file_size = 0u64;
+                            let mut file_mtime = 0i64;
+                            let mut file_mode = 0u32;
+                            let mut is_exec = false;
+
+                            if needs_stat || size_filter.is_some() || time_filter.is_some() {
+                                if let Ok(file_meta) = query_statx(&child_path, true, true) {
+                                    file_size = file_meta.size;
+                                    file_mtime = file_meta.mtime_sec;
+                                    file_mode = file_meta.mode;
+                                    is_exec = file_meta.is_executable;
+
+                                    if let Some(sf) = size_filter {
+                                        if !sf.matches(file_size) {
+                                            matches_all = false;
+                                        }
+                                    }
+                                    if let Some(tf) = time_filter {
+                                        if !tf.matches(file_mtime) {
+                                            matches_all = false;
+                                        }
+                                    }
+                                } else if size_filter.is_some() || time_filter.is_some() {
+                                    matches_all = false;
+                                }
+                            }
+
+                            if empty {
+                                match entry.raw_type {
+                                    RawType::File => {
+                                        if file_size != 0 {
+                                            matches_all = false;
+                                        }
+                                    }
+                                    RawType::Directory => {
+                                        if !is_dir_empty(&child_path) {
+                                            matches_all = false;
+                                        }
+                                    }
+                                    _ => {
+                                        matches_all = false;
+                                    }
+                                }
+                            }
+
+                            if matches_all {
+                                match_counter.fetch_add(1, Ordering::Relaxed);
+                                if let Some(exec) = &executor {
+                                    let _ = exec.execute(&child_path);
+                                } else {
+                                    let record = MatchRecord {
+                                        path: child_path.clone(),
+                                        raw_type: entry.raw_type,
+                                        size: file_size,
+                                        mtime_sec: file_mtime,
+                                        mode: file_mode,
+                                        is_exec,
+                                        score: match_score.unwrap_or(0),
+                                    };
+                                    if sender.send(record).is_err() {
+                                        stop_flag.store(true, Ordering::Relaxed);
+                                    }
+                                }
                             }
                         }
 
-                        let match_score = matcher.matches(entry.name, entry.raw_type);
-                        let entry_matched = match_score.is_some();
+                        if is_directory {
+                            let can_recurse = match max_depth {
+                                Some(max) => next_depth <= max,
+                                None => true,
+                            };
 
-                        if entry_matched || is_directory {
-                            if entry_matched {
-                                let mut matches_all = true;
-
-                                if let Some(min) = min_depth {
-                                    if next_depth < min {
-                                        matches_all = false;
-                                    }
-                                }
-
-                                if let Some(cm) = &content_matcher {
-                                    if entry.raw_type == RawType::File {
-                                        if !cm.matches_file(
-                                            &child_path,
-                                            &mut read_buf,
-                                            &mut lower_buf,
-                                        ) {
-                                            matches_all = false;
-                                        }
-                                    } else {
-                                        matches_all = false;
-                                    }
-                                }
-
-                                let mut file_size = 0u64;
-                                let mut file_mtime = 0i64;
-                                let mut file_mode = 0u32;
-                                let mut is_exec = false;
-
-                                if needs_stat || size_filter.is_some() || time_filter.is_some() {
-                                    if let Ok(file_meta) = query_statx(&child_path, true, true) {
-                                        file_size = file_meta.size;
-                                        file_mtime = file_meta.mtime_sec;
-                                        file_mode = file_meta.mode;
-                                        is_exec = file_meta.is_executable;
-
-                                        if let Some(sf) = size_filter {
-                                            if !sf.matches(file_size) {
-                                                matches_all = false;
-                                            }
-                                        }
-                                        if let Some(tf) = time_filter {
-                                            if !tf.matches(file_mtime) {
-                                                matches_all = false;
-                                            }
-                                        }
-                                    } else if size_filter.is_some() || time_filter.is_some() {
-                                        matches_all = false;
-                                    }
-                                }
-
-                                if empty {
-                                    match entry.raw_type {
-                                        RawType::File => {
-                                            if file_size != 0 {
-                                                matches_all = false;
-                                            }
-                                        }
-                                        RawType::Directory => {
-                                            if !is_dir_empty(&child_path) {
-                                                matches_all = false;
-                                            }
-                                        }
-                                        _ => {
-                                            matches_all = false;
-                                        }
-                                    }
-                                }
-
-                                if matches_all {
-                                    match_counter.fetch_add(1, Ordering::Relaxed);
-                                    if let Some(exec) = &executor {
-                                        let _ = exec.execute(&child_path);
-                                    } else {
-                                        let record = MatchRecord {
-                                            path: child_path.clone(),
-                                            raw_type: entry.raw_type,
-                                            size: file_size,
-                                            mtime_sec: file_mtime,
-                                            mode: file_mode,
-                                            is_exec,
-                                            score: match_score.unwrap_or(0),
-                                        };
-                                        if sender.send(record).is_err() {
-                                            stop_flag.store(true, Ordering::Relaxed);
-                                        }
-                                    }
-                                }
-                            }
-
-                            if is_directory {
-                                let can_recurse = match max_depth {
-                                    Some(max) => next_depth <= max,
-                                    None => true,
-                                };
-
-                                if can_recurse {
-                                    let mut should_descend = true;
-                                    if let Some(expected_dev) = root_dev {
-                                        if let Ok(child_meta) =
-                                            std::fs::symlink_metadata(&child_path)
-                                        {
-                                            if child_meta.dev() != expected_dev {
-                                                should_descend = false;
-                                            }
-                                        } else {
+                            if can_recurse {
+                                let mut should_descend = true;
+                                if let Some(expected_dev) = root_dev {
+                                    if let Ok(child_meta) = std::fs::symlink_metadata(&child_path) {
+                                        if child_meta.dev() != expected_dev {
                                             should_descend = false;
                                         }
+                                    } else {
+                                        should_descend = false;
                                     }
+                                }
 
-                                    if should_descend {
-                                        let mut child_gitignores = Arc::clone(&task.gitignores);
-                                        if !no_ignore {
-                                            let child_gi_file = child_path.join(".gitignore");
-                                            if child_gi_file.is_file() {
-                                                let mut builder =
-                                                    GitignoreBuilder::new(&child_path);
-                                                let _ = builder.add(child_gi_file);
-                                                if let Ok(gi) = builder.build() {
-                                                    let mut new_stack = (*child_gitignores).clone();
-                                                    new_stack.push(gi);
-                                                    child_gitignores = Arc::new(new_stack);
-                                                }
+                                if should_descend {
+                                    let mut child_gitignores = Arc::clone(&task.gitignores);
+                                    if !no_ignore {
+                                        let child_gi_file = child_path.join(".gitignore");
+                                        if child_gi_file.is_file() {
+                                            let mut builder = GitignoreBuilder::new(&child_path);
+                                            let _ = builder.add(child_gi_file);
+                                            if let Ok(gi) = builder.build() {
+                                                let mut new_stack = (*child_gitignores).clone();
+                                                new_stack.push(gi);
+                                                child_gitignores = Arc::new(new_stack);
                                             }
                                         }
-
-                                        worker.push(DirTask {
-                                            path: child_path,
-                                            depth: next_depth,
-                                            gitignores: child_gitignores,
-                                        });
                                     }
+
+                                    worker.push(DirTask {
+                                        path: child_path,
+                                        depth: next_depth,
+                                        gitignores: child_gitignores,
+                                    });
                                 }
                             }
                         }

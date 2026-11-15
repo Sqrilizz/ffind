@@ -187,14 +187,26 @@ impl Matcher {
                 if needle_lower.len() > name_bytes.len() {
                     return None;
                 }
-                let mut lower_buf = Vec::with_capacity(name_bytes.len());
-                for &b in name_bytes {
-                    lower_buf.push(b.to_ascii_lowercase());
-                }
-                if memchr::memmem::find(&lower_buf, needle_lower).is_some() {
-                    Some(0)
+                if name_bytes.len() <= 256 {
+                    let mut buf = [0u8; 256];
+                    for (i, &b) in name_bytes.iter().enumerate() {
+                        buf[i] = b.to_ascii_lowercase();
+                    }
+                    if memchr::memmem::find(&buf[..name_bytes.len()], needle_lower).is_some() {
+                        Some(0)
+                    } else {
+                        None
+                    }
                 } else {
-                    None
+                    let mut lower_buf = Vec::with_capacity(name_bytes.len());
+                    for &b in name_bytes {
+                        lower_buf.push(b.to_ascii_lowercase());
+                    }
+                    if memchr::memmem::find(&lower_buf, needle_lower).is_some() {
+                        Some(0)
+                    } else {
+                        None
+                    }
                 }
             }
             PatternMatcher::ExactCaseSensitive { target } => {
