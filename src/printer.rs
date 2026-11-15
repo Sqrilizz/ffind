@@ -34,6 +34,8 @@ struct JsonRecord<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     lines: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    crc32: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     score: Option<i32>,
 }
 pub fn write_record<W: Write>(
@@ -56,6 +58,7 @@ pub fn write_record<W: Write>(
             raw_type,
             size: record.size,
             lines: record.lines,
+            crc32: record.crc32.map(|h| format!("{h:08x}")),
             mtime: record.mtime_sec,
             mode: record.mode,
             is_exec: record.is_exec,
@@ -271,6 +274,7 @@ mod tests {
             raw_type: RawType::Directory,
             size: 4096,
             lines: None,
+            crc32: None,
             mtime_sec: 0,
             mode: 0o755,
             is_exec: false,
@@ -281,6 +285,7 @@ mod tests {
             raw_type: RawType::File,
             size: 1000,
             lines: Some(10),
+            crc32: None,
             mtime_sec: 0,
             mode: 0o644,
             is_exec: false,
@@ -291,6 +296,7 @@ mod tests {
             raw_type: RawType::File,
             size: 5000,
             lines: Some(50),
+            crc32: None,
             mtime_sec: 0,
             mode: 0o644,
             is_exec: false,
@@ -315,6 +321,7 @@ mod tests {
             raw_type: RawType::File,
             size: 1234,
             lines: Some(42),
+            crc32: Some(0xdeadbeef),
             mtime_sec: 1700000000,
             mode: 0o100644,
             is_exec: false,
@@ -327,5 +334,6 @@ mod tests {
         assert!(line.contains("\"path\":\"src/main.rs\""));
         assert!(line.contains("\"type\":\"file\""));
         assert!(line.contains("\"size\":1234"));
+        assert!(line.contains("\"crc32\":\"deadbeef\""));
     }
 }

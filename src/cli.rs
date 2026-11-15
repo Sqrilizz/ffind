@@ -50,6 +50,25 @@ pub struct Cli {
     #[arg(long = "changed", value_name = "DURATION", allow_hyphen_values = true)]
     pub changed: Option<String>,
 
+    #[arg(
+        long = "newer-than",
+        value_name = "AGE|DATE",
+        allow_hyphen_values = true,
+        conflicts_with_all = ["changed", "older_than"]
+    )]
+    pub newer_than: Option<String>,
+
+    #[arg(
+        long = "older-than",
+        value_name = "AGE|DATE",
+        allow_hyphen_values = true,
+        conflicts_with_all = ["changed", "newer_than"]
+    )]
+    pub older_than: Option<String>,
+
+    #[arg(long = "hash")]
+    pub hash: bool,
+
     #[arg(long = "empty")]
     pub empty: bool,
 
@@ -124,6 +143,12 @@ pub struct Cli {
 
     #[arg(long = "time")]
     pub time: bool,
+
+    #[arg(
+        long = "tree",
+        conflicts_with_all = ["json", "long", "print0", "exec", "exec_batch"]
+    )]
+    pub tree: bool,
 
     #[arg(
         short = 'X',

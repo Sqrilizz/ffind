@@ -70,6 +70,89 @@ pub enum TimeFilter {
     Older(i64),
 }
 
+fn duration_seconds(unit: &str) -> Result<i64> {
+    let unit_lower = unit.to_ascii_lowercase();
+    match unit {
+        "M" => Ok(30 * 86400),
+        _ => match unit_lower.as_str() {
+            "" | "s" => Ok(1),
+            "m" => Ok(60),
+            "h" => Ok(3600),
+            "d" => Ok(86400),
+            "w" => Ok(7 * 86400),
+            "mo" => Ok(30 * 86400),
+            "y" => Ok(365 * 86400),
+            other => anyhow::bail!("unknown time unit: '{other}'"),
+        },
+    }
+}
+
+fn parse_datetime_threshold(s: &str) -> Result<i64> {
+    let (date_part, time_part) = match s.split_once(['T', ' ']) {
+        Some((d, t)) => (d, Some(t)),
+        None => (s, None),
+    };
+
+    let mut date_fields = date_part.split('-');
+    let year: i32 = date_fields
+        .next()
+        .and_then(|v| v.parse().ok())
+        .with_context(|| format!("invalid date: '{s}'"))?;
+    let month: i32 = date_fields
+        .next()
+        .and_then(|v| v.parse().ok())
+        .with_context(|| format!("invalid date: '{s}'"))?;
+    let day: i32 = date_fields
+        .next()
+        .and_then(|v| v.parse().ok())
+        .with_context(|| format!("invalid date: '{s}'"))?;
+    if date_fields.next().is_some() {
+        anyhow::bail!("invalid date: '{s}'");
+    }
+
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        anyhow::bail!("invalid date: '{s}'");
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let days_in_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][(month - 1) as usize]
+        + i32::from(leap && month == 2);
+    if day > days_in_month {
+        anyhow::bail!("invalid date: '{s}'");
+    }
+
+    let (hour, minute) = match time_part {
+        None => (0, 0),
+        Some(t) => {
+            let mut fields = t.split(':');
+            let hour: i32 = fields
+                .next()
+                .and_then(|v| v.parse().ok())
+                .with_context(|| format!("invalid time of day: '{s}'"))?;
+            let minute: i32 = fields
+                .next()
+                .and_then(|v| v.parse().ok())
+                .with_context(|| format!("invalid time of day: '{s}'"))?;
+            if fields.next().is_some() || hour > 23 || minute > 59 {
+                anyhow::bail!("invalid time of day: '{s}'");
+            }
+            (hour, minute)
+        }
+    };
+
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    tm.tm_isdst = -1;
+    let epoch = unsafe { libc::mktime(&mut tm) };
+    if epoch < 0 {
+        anyhow::bail!("invalid date: '{s}'");
+    }
+    Ok(epoch)
+}
+
 impl TimeFilter {
     pub fn parse(s: &str, now_sec: i64) -> Result<Self> {
         let s = s.trim();
@@ -94,20 +177,7 @@ impl TimeFilter {
             .parse()
             .with_context(|| format!("invalid number in time filter: '{num_str}'"))?;
 
-        let unit_lower = unit.to_ascii_lowercase();
-        let seconds_per_unit: i64 = match unit {
-            "M" => 30 * 86400,
-            _ => match unit_lower.as_str() {
-                "" | "s" => 1,
-                "m" => 60,
-                "h" => 3600,
-                "d" => 86400,
-                "w" => 7 * 86400,
-                "mo" => 30 * 86400,
-                "y" => 365 * 86400,
-                other => anyhow::bail!("unknown time unit: '{other}'"),
-            },
-        };
+        let seconds_per_unit = duration_seconds(unit)?;
 
         let duration_sec = value
             .checked_mul(seconds_per_unit)
@@ -119,6 +189,38 @@ impl TimeFilter {
             '+' => Ok(Self::Older(threshold)),
             _ => Ok(Self::Newer(threshold)),
         }
+    }
+
+    /// Parses an age (`2h`, `10m`, `3d`, plain seconds) or an absolute date
+    /// (`2026-11-01`, optionally `2026-11-01T15:30` or `2026-11-01 15:30`,
+    /// local time) into an epoch-second cutoff.
+    pub fn parse_cutoff(s: &str, now_sec: i64) -> Result<i64> {
+        let s = s.trim();
+        if s.is_empty() {
+            anyhow::bail!("empty time filter");
+        }
+
+        let digits_end = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+        let unit = &s[digits_end..];
+
+        if unit.is_empty() {
+            let seconds: i64 = s
+                .parse()
+                .with_context(|| format!("invalid time filter: '{s}'"))?;
+            return Ok(now_sec.saturating_sub(seconds));
+        }
+
+        if !unit.contains('-') {
+            let value: i64 = s[..digits_end]
+                .parse()
+                .with_context(|| format!("invalid time filter: '{s}'"))?;
+            let duration = value
+                .checked_mul(duration_seconds(unit)?)
+                .context("time filter overflow")?;
+            return Ok(now_sec.saturating_sub(duration));
+        }
+
+        parse_datetime_threshold(s)
     }
 
     #[inline]
@@ -263,5 +365,56 @@ mod tests {
         assert!(meta.size > 0);
         assert!(meta.mtime_sec > 0);
         assert!(meta.mode > 0);
+    }
+
+    #[test]
+    fn test_parse_cutoff_durations() {
+        let now = 1_000_000i64;
+        assert_eq!(TimeFilter::parse_cutoff("2h", now).unwrap(), now - 7200);
+        assert_eq!(TimeFilter::parse_cutoff("10m", now).unwrap(), now - 600);
+        assert_eq!(TimeFilter::parse_cutoff("3d", now).unwrap(), now - 3 * 86400);
+        assert_eq!(TimeFilter::parse_cutoff("1M", now).unwrap(), now - 30 * 86400);
+        assert_eq!(TimeFilter::parse_cutoff("90", now).unwrap(), now - 90);
+        assert!(TimeFilter::parse_cutoff("", now).is_err());
+        assert!(TimeFilter::parse_cutoff("2q", now).is_err());
+        assert!(TimeFilter::parse_cutoff("h", now).is_err());
+        assert!(TimeFilter::parse_cutoff("99999999999999999999d", now).is_err());
+    }
+
+    #[test]
+    fn test_parse_cutoff_dates() {
+        let now = 1_000_000_000i64;
+
+        // Decomposition must match libc's local-time conversion for the same fields.
+        let expected = {
+            let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+            tm.tm_year = 2026 - 1900;
+            tm.tm_mon = 10;
+            tm.tm_mday = 1;
+            tm.tm_hour = 15;
+            tm.tm_min = 30;
+            tm.tm_isdst = -1;
+            unsafe { libc::mktime(&mut tm) }
+        };
+        assert_eq!(
+            TimeFilter::parse_cutoff("2026-11-01T15:30", now).unwrap(),
+            expected
+        );
+        assert_eq!(
+            TimeFilter::parse_cutoff("2026-11-01 15:30", now).unwrap(),
+            expected
+        );
+        assert_eq!(
+            TimeFilter::parse_cutoff("2026-11-01", now).unwrap(),
+            TimeFilter::parse_cutoff("2026-11-01T00:00", now).unwrap()
+        );
+
+        assert!(TimeFilter::parse_cutoff("2026-13-01", now).is_err());
+        assert!(TimeFilter::parse_cutoff("2026-02-30", now).is_err());
+        assert!(TimeFilter::parse_cutoff("2026-02-29", now).is_err());
+        assert!(TimeFilter::parse_cutoff("2024-02-29", now).is_ok());
+        assert!(TimeFilter::parse_cutoff("2026-01-01T25:00", now).is_err());
+        assert!(TimeFilter::parse_cutoff("2026-01-01T00:60", now).is_err());
+        assert!(TimeFilter::parse_cutoff("not-a-date", now).is_err());
     }
 }

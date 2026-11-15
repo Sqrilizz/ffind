@@ -27,6 +27,7 @@ pub struct MatchRecord {
     pub raw_type: RawType,
     pub size: u64,
     pub lines: Option<u64>,
+    pub crc32: Option<u32>,
     pub mtime_sec: i64,
     pub mode: u32,
     pub is_exec: bool,
@@ -43,6 +44,7 @@ pub struct WalkContext {
     pub executor: Option<Arc<CommandExecutor>>,
     pub limit: Option<usize>,
     pub needs_lines: bool,
+    pub needs_hash: bool,
     pub stop_flag: Arc<AtomicBool>,
     pub match_counter: Arc<AtomicUsize>,
     pub needs_stat: bool,
@@ -94,6 +96,7 @@ struct EntryFilters {
     time_filter: Option<TimeFilter>,
     needs_stat: bool,
     needs_lines: bool,
+    needs_hash: bool,
     empty: bool,
     follow: bool,
 }
@@ -102,6 +105,7 @@ struct EntryStats {
     score: i32,
     size: u64,
     lines: Option<u64>,
+    crc32: Option<u32>,
     mtime_sec: i64,
     mode: u32,
     is_exec: bool,
@@ -119,6 +123,23 @@ impl EntryEvaluator {
             filters,
             read_buf: vec![0u8; READ_BUF_SIZE],
             lower_buf: Vec::new(),
+        }
+    }
+
+    fn hash_file(&mut self, path: &Path) -> Option<u32> {
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return None;
+        };
+
+        let mut hasher = crc32fast::Hasher::new();
+        loop {
+            let Ok(n) = file.read(&mut self.read_buf) else {
+                return None;
+            };
+            if n == 0 {
+                return Some(hasher.finalize());
+            }
+            hasher.update(&self.read_buf[..n]);
         }
     }
 
@@ -232,11 +253,17 @@ impl EntryEvaluator {
             });
         }
 
+        let mut crc32 = None;
+        if matches_all && self.filters.needs_hash && raw_type == RawType::File {
+            crc32 = self.hash_file(path);
+        }
+
         if matches_all {
             Some(EntryStats {
                 score,
                 size,
                 lines,
+                crc32,
                 mtime_sec,
                 mode,
                 is_exec,
@@ -271,6 +298,7 @@ impl MatchSink<'_> {
             raw_type,
             size: stats.size,
             lines: stats.lines,
+            crc32: stats.crc32,
             mtime_sec: stats.mtime_sec,
             mode: stats.mode,
             is_exec: stats.is_exec,
@@ -366,6 +394,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
         time_filter: ctx.time_filter,
         needs_stat: ctx.needs_stat,
         needs_lines: ctx.needs_lines,
+        needs_hash: ctx.needs_hash,
         empty: ctx.empty,
         follow: ctx.follow,
     };

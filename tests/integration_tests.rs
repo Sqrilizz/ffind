@@ -448,3 +448,130 @@ fn test_exec_limit_exact_under_concurrency() {
         "limit must be exact regardless of worker thread count, got: {stdout}"
     );
 }
+
+#[test]
+fn test_empty_flag() {
+    let dir = TempTestDir::new("empty");
+    dir.create_file("empty.txt", b"");
+    dir.create_file("full.txt", b"data");
+    dir.create_dir("empty_dir");
+    dir.create_dir("full_dir");
+    dir.create_file("full_dir/x.txt", b"x");
+
+    let (stdout, _, success) = run_ffind(&["--empty"], &dir.path);
+    assert!(success);
+    assert!(stdout.contains("empty.txt"));
+    assert!(stdout.contains("empty_dir"));
+    assert!(!stdout.contains("full.txt"));
+    assert!(!stdout.contains("full_dir"));
+}
+
+#[test]
+fn test_hash_json() {
+    let dir = TempTestDir::new("hash");
+    dir.create_file("a.bin", b"hello\n");
+    dir.create_file("b.bin", b"hello\n");
+    dir.create_file("c.bin", b"world\n");
+
+    let (stdout, _, success) = run_ffind(&["--hash", "--json", "bin"], &dir.path);
+    assert!(success);
+    let records: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+
+    let find = |suffix: &str| {
+        records
+            .iter()
+            .find(|r| r["path"].as_str().unwrap().ends_with(suffix))
+            .unwrap()
+            .clone()
+    };
+
+    let a = find("a.bin");
+    let b = find("b.bin");
+    let c = find("c.bin");
+
+    assert_eq!(a["crc32"].as_str(), Some("363a3020"));
+    assert_eq!(a["crc32"], b["crc32"], "identical content must hash equal");
+    assert_ne!(a["crc32"], c["crc32"]);
+
+    let (stdout_noflag, _, success2) = run_ffind(&["--json", "bin"], &dir.path);
+    assert!(success2);
+    let record: serde_json::Value =
+        serde_json::from_str(stdout_noflag.lines().next().unwrap()).unwrap();
+    assert!(record.get("crc32").is_none(), "no hash work without --hash");
+}
+
+#[test]
+fn test_newer_older_than() {
+    let dir = TempTestDir::new("time_cutoff");
+    let old_path = dir.create_file("old.txt", b"old");
+    let new_path = dir.create_file("new.txt", b"new");
+
+    use std::fs::FileTimes;
+    use std::time::{Duration, SystemTime};
+
+    let now = SystemTime::now();
+    let ten_days_ago = now - Duration::from_secs(10 * 86400);
+    let one_hour_ago = now - Duration::from_secs(3600);
+
+    let old_file = std::fs::File::options().append(true).open(&old_path).unwrap();
+    old_file
+        .set_times(FileTimes::new().set_modified(ten_days_ago))
+        .unwrap();
+    let new_file = std::fs::File::options().append(true).open(&new_path).unwrap();
+    new_file
+        .set_times(FileTimes::new().set_modified(one_hour_ago))
+        .unwrap();
+
+    let (stdout, _, success) = run_ffind(&["--older-than", "1d", "txt"], &dir.path);
+    assert!(success);
+    assert!(stdout.contains("old.txt"));
+    assert!(!stdout.contains("new.txt"));
+
+    let (stdout, _, success) = run_ffind(&["--newer-than", "1d", "txt"], &dir.path);
+    assert!(success);
+    assert!(stdout.contains("new.txt"));
+    assert!(!stdout.contains("old.txt"));
+
+    let (stdout, _, success) = run_ffind(&["--newer-than", "2020-01-01", "txt"], &dir.path);
+    assert!(success);
+    assert!(stdout.contains("old.txt") && stdout.contains("new.txt"));
+
+    let (stdout, _, success) = run_ffind(&["--older-than", "2099-01-01", "txt"], &dir.path);
+    assert!(success);
+    assert!(stdout.contains("old.txt") && stdout.contains("new.txt"));
+
+    let (stdout, _, success) = run_ffind(&["--newer-than", "2030-01-01", "txt"], &dir.path);
+    assert!(success);
+    assert!(stdout.is_empty());
+
+    let (_, _, success) = run_ffind(&["--newer-than", "garbage"], &dir.path);
+    assert!(!success, "invalid spec must fail loudly");
+}
+
+#[test]
+fn test_tree_output() {
+    let dir = TempTestDir::new("tree");
+    dir.create_file("src/main.rs", b"a");
+    dir.create_file("src/cli.rs", b"b");
+    dir.create_file("docs/guide.md", b"c");
+    dir.create_file("Cargo.toml", b"d");
+
+    let (stdout, _, success) = run_ffind(&["--tree"], &dir.path);
+    assert!(success);
+    assert!(stdout.contains("├──"), "missing tee branch: {stdout}");
+    assert!(stdout.contains("└──"), "missing last branch: {stdout}");
+    assert!(stdout.contains("src/"));
+    assert!(stdout.contains("docs/"), "ancestor dirs must be shown");
+    assert!(stdout.contains("main.rs"));
+    assert!(stdout.contains("Cargo.toml"));
+    assert!(stdout.contains("│"), "nested files need vertical guides");
+
+    let (stdout_md, _, success2) = run_ffind(&["--tree", "md"], &dir.path);
+    assert!(success2);
+    assert!(stdout_md.contains("docs/"));
+    assert!(stdout_md.contains("guide.md"));
+    assert!(!stdout_md.contains("main.rs"));
+}

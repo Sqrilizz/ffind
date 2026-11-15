@@ -11,6 +11,7 @@ mod formatter;
 mod matcher;
 mod printer;
 mod statx;
+mod tree;
 mod walker;
 
 use anyhow::Result;
@@ -52,17 +53,23 @@ fn main() -> Result<()> {
 
     let size_filter = cli.size.as_deref().map(SizeFilter::parse).transpose()?;
 
-    let time_filter = cli
-        .changed
-        .as_deref()
-        .map(|s| {
-            let now_sec = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs() as i64;
-            TimeFilter::parse(s, now_sec)
+    let now_sec = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+
+    let time_filter = if let Some(spec) = cli.newer_than.as_ref().or(cli.older_than.as_ref()) {
+        let threshold = TimeFilter::parse_cutoff(spec, now_sec)?;
+        Some(if cli.newer_than.is_some() {
+            TimeFilter::Newer(threshold)
+        } else {
+            TimeFilter::Older(threshold)
         })
-        .transpose()?;
+    } else if let Some(s) = cli.changed.as_deref() {
+        Some(TimeFilter::parse(s, now_sec)?)
+    } else {
+        None
+    };
 
     let root_dev = if cli.one_file_system {
         let meta_res = if cli.follow {
@@ -86,7 +93,8 @@ fn main() -> Result<()> {
     let stop_flag = Arc::new(AtomicBool::new(false));
     let match_counter = Arc::new(AtomicUsize::new(0));
 
-    let needs_stat = cli.long || cli.sort.is_some() || cli.summary || cli.empty || cli.json;
+    let needs_stat =
+        cli.long || cli.sort.is_some() || cli.summary || cli.empty || cli.json || cli.hash;
     let needs_lines = cli.lines || cli.sort == Some(SortBy::Lines);
 
     let ctx = WalkContext {
@@ -99,6 +107,7 @@ fn main() -> Result<()> {
         executor,
         limit: cli.limit,
         needs_lines,
+        needs_hash: cli.hash,
         stop_flag: Arc::clone(&stop_flag),
         match_counter: Arc::clone(&match_counter),
         needs_stat,
@@ -107,7 +116,7 @@ fn main() -> Result<()> {
         follow: cli.follow,
     };
 
-    let needs_collection = cli.sort.is_some() || cli.exec_batch.is_some();
+    let needs_collection = cli.sort.is_some() || cli.exec_batch.is_some() || cli.tree;
 
     let printer_handle = if !needs_collection {
         let print_config = PrintConfig {
@@ -201,6 +210,13 @@ fn main() -> Result<()> {
                 }
             }
             batch_executor.execute_batch(&paths)?;
+        } else if cli.tree {
+            if let Some(s) = &mut summary {
+                for record in &records {
+                    s.update(record);
+                }
+            }
+            tree::print_tree(&records, &cli.path, &colorizer)?;
         } else {
             let stdout = io::stdout();
             let mut writer = BufWriter::with_capacity(131072, stdout.lock());

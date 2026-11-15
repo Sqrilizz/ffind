@@ -122,6 +122,9 @@ ffind -L target.txt
 | `-L, --follow` | Follow symbolic links to directories (with cycle prevention) | `ffind -L` |
 | `--size <SIZE>` | Filter by size (`+10M`, `-500k`, `1G`) | `ffind --size +10M` |
 | `--changed <DURATION>` | Filter by modification time (`-24h`, `-7d`, `+30m`, `-1M`) | `ffind --changed -2h` |
+| `--newer-than <AGE\|DATE>` | Modified after an age (`2h`, `10m`, `3d`, plain seconds) or an absolute date (`2026-11-01`, `2026-11-01T15:30`) | `ffind --newer-than 1d` |
+| `--older-than <AGE\|DATE>` | Modified before an age or an absolute date (local time) | `ffind --older-than 2026-01-01` |
+| `--hash` | Compute CRC32 of matched files (adds `crc32` to `--json`; also reports `size`) | `ffind --hash --json` |
 | `--empty` | Match empty files (size 0) and empty directories | `ffind --empty` |
 | `-E, --exclude <PATTERN>` | Exclude entries matching substring/name | `ffind -E tests` |
 | `--min-depth <NUM>` | Minimum depth of matched entries (start point is depth 0) | `ffind --min-depth 2` |
@@ -145,6 +148,7 @@ ffind -L target.txt
 | `-j, --threads <NUM>` | Set number of worker threads (default: available CPU cores) |
 | `-0, --print0` | Delimit results with a null byte (for `xargs -0`) |
 | `--color <auto\|always\|never>` | Control colored output (respects `LS_COLORS`) |
+| `--tree` | Print matches as a minimal Unicode tree (mutually exclusive with `--json`, `-l`, `-0`, `-X`, `--exec-batch`) |
 | `--time` | Measure execution time and matched count (outputs to `stderr`) |
 | `-X, --exec <CMD>...` | Execute command for each match individually (placeholders: `{}` full path, `{/}` file name, `{//}` parent dir, `{/.}` file stem) |
 | `--exec-batch <CMD>...` | Execute command once with all matching paths as arguments (append paths if no placeholder given) |
@@ -219,6 +223,39 @@ Total size: 63.6 KiB
 Sort files by line count, largest first:
 ```bash
 ffind --lines -e rs --sort lines --limit 5
+```
+
+### Duplicate Hunting in One Pass
+```bash
+ffind --hash --json -e png | jq -r '[.size, .crc32, .path] | @tsv' | sort
+```
+Identical files share the same `size` + `crc32` pair; group and compare from there.
+
+### Human-Readable Time Filters
+```bash
+# Files modified in the last day
+ffind --newer-than 1d
+
+# Files not touched since a date
+ffind --older-than 2026-01-01 --size +10M
+```
+
+### Tree View
+```bash
+ffind --tree
+```
+Output:
+```
+justunnyproject/
+├── Cargo.lock
+├── Cargo.toml
+├── README.md
+├── src/
+│   ├── cli.rs
+│   ├── main.rs
+│   └── walker.rs
+└── tests/
+    └── integration_tests.rs
 ```
 
 ### Batch Command Execution
