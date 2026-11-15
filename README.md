@@ -1,5 +1,10 @@
 # ffind
 
+[![Crates.io](https://img.shields.io/crates/v/ffind-rs)](https://crates.io/crates/ffind-rs)
+[![CI](https://github.com/Sqrilizz/ffind/actions/workflows/ci.yml/badge.svg)](https://github.com/Sqrilizz/ffind/actions/workflows/ci.yml)
+[![License](https://img.shields.io/crates/l/ffind-rs)](https://github.com/Sqrilizz/ffind)
+[![Downloads](https://img.shields.io/crates/d/ffind-rs)](https://crates.io/crates/ffind-rs)
+
 High-performance, multi-threaded file finder for Linux written in Rust.
 
 Designed as a fast, modern alternative to `find` with work-stealing concurrency, direct kernel syscalls (`getdents64`, `statx`), hierarchical `.gitignore` support, smart ignore defaults, and rich filtering options.
@@ -48,12 +53,31 @@ hyperfine --warmup 3 'ffind -e h /usr/include' 'fd -e h "" /usr/include' 'find /
 
 ## Installation
 
+### Prebuilt binaries
+
+Static and dynamically linked builds for x86_64 Linux are attached to every [GitHub Release](https://github.com/Sqrilizz/ffind/releases/latest):
+
+```bash
+curl -LO https://github.com/Sqrilizz/ffind/releases/latest/download/ffind-v0.2.0-x86_64-linux-musl.tar.gz
+tar -xzf ffind-v0.2.0-x86_64-linux-musl.tar.gz
+install -m 755 ffind-*-x86_64-linux-musl/ffind ~/.local/bin/
+```
+
+The `-musl` build is fully static and runs on any x86_64 Linux without runtime dependencies. Every tarball has a `.sha256` checksum next to it.
+
 ### Install from crates.io
 
 ```bash
 cargo install ffind-rs
 ```
 The binary is installed as `ffind`.
+
+### Arch Linux (AUR)
+
+```bash
+paru -S ffind-rs        # build from source
+paru -S ffind-rs-bin    # prebuilt binary from GitHub Releases
+```
 
 ### Prerequisites
 
