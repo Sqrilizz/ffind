@@ -10,8 +10,7 @@ pub fn parse_size_bytes(s: &str) -> Result<u64> {
         anyhow::bail!("empty size");
     }
 
-    let (num_str, unit) =
-        s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
+    let (num_str, unit) = s.split_at(s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len()));
 
     let value: u64 = num_str
         .parse()
@@ -26,9 +25,7 @@ pub fn parse_size_bytes(s: &str) -> Result<u64> {
         other => anyhow::bail!("unknown size unit: '{other}'"),
     };
 
-    value
-        .checked_mul(multiplier)
-        .context("size overflow")
+    value.checked_mul(multiplier).context("size overflow")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -331,7 +328,10 @@ mod tests {
         assert_eq!(SizeFilter::parse("512").unwrap(), SizeFilter::Exact(512));
         // Case-insensitive units and explicit 'B'.
         assert_eq!(SizeFilter::parse("+2k").unwrap(), SizeFilter::Greater(2048));
-        assert_eq!(SizeFilter::parse("-4GIB").unwrap(), SizeFilter::Less(4 * 1024 * 1024 * 1024));
+        assert_eq!(
+            SizeFilter::parse("-4GIB").unwrap(),
+            SizeFilter::Less(4 * 1024 * 1024 * 1024)
+        );
         assert_eq!(SizeFilter::parse("1c").unwrap(), SizeFilter::Exact(1));
         // Zero boundary.
         let zero = SizeFilter::parse("0").unwrap();
@@ -350,15 +350,36 @@ mod tests {
     fn test_time_filter_units_and_errors() {
         let now = 1000000i64;
         // No sign defaults to "newer than".
-        assert_eq!(TimeFilter::parse("5m", now).unwrap(), TimeFilter::Newer(now - 300));
-        assert_eq!(TimeFilter::parse("1w", now).unwrap(), TimeFilter::Newer(now - 7 * 86400));
-        assert_eq!(TimeFilter::parse("1y", now).unwrap(), TimeFilter::Newer(now - 365 * 86400));
+        assert_eq!(
+            TimeFilter::parse("5m", now).unwrap(),
+            TimeFilter::Newer(now - 300)
+        );
+        assert_eq!(
+            TimeFilter::parse("1w", now).unwrap(),
+            TimeFilter::Newer(now - 7 * 86400)
+        );
+        assert_eq!(
+            TimeFilter::parse("1y", now).unwrap(),
+            TimeFilter::Newer(now - 365 * 86400)
+        );
         // 'M' (capital) means months, 'm' means minutes.
-        assert_eq!(TimeFilter::parse("2M", now).unwrap(), TimeFilter::Newer(now - 2 * 30 * 86400));
-        assert_eq!(TimeFilter::parse("2m", now).unwrap(), TimeFilter::Newer(now - 120));
+        assert_eq!(
+            TimeFilter::parse("2M", now).unwrap(),
+            TimeFilter::Newer(now - 2 * 30 * 86400)
+        );
+        assert_eq!(
+            TimeFilter::parse("2m", now).unwrap(),
+            TimeFilter::Newer(now - 120)
+        );
         // Case-insensitive units.
-        assert_eq!(TimeFilter::parse("+24H", now).unwrap(), TimeFilter::Older(now - 86400));
-        assert_eq!(TimeFilter::parse("+3D", now).unwrap(), TimeFilter::Older(now - 3 * 86400));
+        assert_eq!(
+            TimeFilter::parse("+24H", now).unwrap(),
+            TimeFilter::Older(now - 86400)
+        );
+        assert_eq!(
+            TimeFilter::parse("+3D", now).unwrap(),
+            TimeFilter::Older(now - 3 * 86400)
+        );
 
         // Errors.
         assert!(TimeFilter::parse("", now).is_err());
@@ -380,8 +401,14 @@ mod tests {
         let now = 1_000_000i64;
         assert_eq!(TimeFilter::parse_cutoff("2h", now).unwrap(), now - 7200);
         assert_eq!(TimeFilter::parse_cutoff("10m", now).unwrap(), now - 600);
-        assert_eq!(TimeFilter::parse_cutoff("3d", now).unwrap(), now - 3 * 86400);
-        assert_eq!(TimeFilter::parse_cutoff("1M", now).unwrap(), now - 30 * 86400);
+        assert_eq!(
+            TimeFilter::parse_cutoff("3d", now).unwrap(),
+            now - 3 * 86400
+        );
+        assert_eq!(
+            TimeFilter::parse_cutoff("1M", now).unwrap(),
+            now - 30 * 86400
+        );
         assert_eq!(TimeFilter::parse_cutoff("90", now).unwrap(), now - 90);
         assert!(TimeFilter::parse_cutoff("", now).is_err());
         assert!(TimeFilter::parse_cutoff("2q", now).is_err());

@@ -220,12 +220,18 @@ fn test_min_depth_boundaries() {
 
     let (stdout_min1, _, s1) = run_ffind(&["txt", "--min-depth", "1"], &dir.path);
     assert!(s1);
-    assert!(stdout_min1.contains("top.txt"), "depth-1 entries pass min-depth 1");
+    assert!(
+        stdout_min1.contains("top.txt"),
+        "depth-1 entries pass min-depth 1"
+    );
     assert!(stdout_min1.contains("mid.txt"));
 
     let (stdout_min2, _, s2) = run_ffind(&["txt", "--min-depth", "2"], &dir.path);
     assert!(s2);
-    assert!(!stdout_min2.contains("top.txt"), "depth-1 entries fail min-depth 2");
+    assert!(
+        !stdout_min2.contains("top.txt"),
+        "depth-1 entries fail min-depth 2"
+    );
     assert!(stdout_min2.contains("mid.txt"));
 }
 
@@ -236,8 +242,7 @@ fn test_limit_with_exec() {
         dir.create_file(&format!("file_{:02}.txt", i), b"content");
     }
 
-    let (stdout, _, success) =
-        run_ffind(&["txt", "--limit", "2", "-X", "echo", "ran"], &dir.path);
+    let (stdout, _, success) = run_ffind(&["txt", "--limit", "2", "-X", "echo", "ran"], &dir.path);
     assert!(success);
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(lines.len(), 2, "exec should honor --limit, got: {stdout}");
@@ -293,7 +298,10 @@ fn test_smart_ignores_and_hidden_defaults() {
     let (stdout_h, _, success_h) = run_ffind(&["-H", ""], &dir.path);
     assert!(success_h);
     assert!(stdout_h.contains(".hidden.txt"));
-    assert!(!stdout_h.contains("node_modules"), "hidden flag bypasses hide, not ignore");
+    assert!(
+        !stdout_h.contains("node_modules"),
+        "hidden flag bypasses hide, not ignore"
+    );
 
     let (stdout_ni, _, success_ni) = run_ffind(&["--no-ignore", "-H", ""], &dir.path);
     assert!(success_ni);
@@ -312,9 +320,11 @@ fn test_sort_size_descending() {
     assert!(success);
     let sizes: Vec<u64> = stdout
         .lines()
-        .map(|l| serde_json::from_str::<serde_json::Value>(l).unwrap()["size"]
-            .as_u64()
-            .unwrap())
+        .map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).unwrap()["size"]
+                .as_u64()
+                .unwrap()
+        })
         .collect();
     let mut sorted_desc = sizes.clone();
     sorted_desc.sort_unstable_by(|a, b| b.cmp(a));
@@ -374,7 +384,10 @@ fn test_summary_total_lines() {
 
     let (stdout_noflag, stderr_noflag, success2) = run_ffind(&["--summary", "txt"], &dir.path);
     assert!(success2);
-    assert!(!stderr_noflag.contains("Total lines"), "stderr: {stderr_noflag}");
+    assert!(
+        !stderr_noflag.contains("Total lines"),
+        "stderr: {stderr_noflag}"
+    );
     assert_eq!(stdout_noflag.lines().count(), 3);
 }
 
@@ -427,7 +440,10 @@ fn test_lines_without_flag_stays_free() {
     let (stdout, _, success) = run_ffind(&["--json", "txt"], &dir.path);
     assert!(success);
     let record: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
-    assert!(record.get("lines").is_none(), "no line work without --lines");
+    assert!(
+        record.get("lines").is_none(),
+        "no line work without --lines"
+    );
 }
 
 #[test]
@@ -512,8 +528,10 @@ fn test_hash_max_size_skips_large_files() {
     dir.create_file("small.bin", &[b'x'; 6]);
     dir.create_file("big.bin", &[b'x'; 8]);
 
-    let (stdout, _, success) =
-        run_ffind(&["--hash", "--hash-max-size", "6", "--json", "bin"], &dir.path);
+    let (stdout, _, success) = run_ffind(
+        &["--hash", "--hash-max-size", "6", "--json", "bin"],
+        &dir.path,
+    );
     assert!(success);
     let records: Vec<serde_json::Value> = stdout
         .lines()
@@ -524,13 +542,19 @@ fn test_hash_max_size_skips_large_files() {
         .iter()
         .find(|r| r["path"].as_str().unwrap().ends_with("small.bin"))
         .unwrap();
-    assert!(small.get("crc32").is_some(), "file within cap must be hashed");
+    assert!(
+        small.get("crc32").is_some(),
+        "file within cap must be hashed"
+    );
 
     let big = records
         .iter()
         .find(|r| r["path"].as_str().unwrap().ends_with("big.bin"))
         .unwrap();
-    assert!(big.get("crc32").is_none(), "file above cap must not be hashed");
+    assert!(
+        big.get("crc32").is_none(),
+        "file above cap must not be hashed"
+    );
 }
 
 #[test]
@@ -540,8 +564,7 @@ fn test_limit_exact_with_lines_streaming() {
         dir.create_file(&format!("f{:02}.txt", i), b"1\n2\n3\n");
     }
 
-    let (stdout, _, success) =
-        run_ffind(&["--lines", "--limit", "4", "--json", "txt"], &dir.path);
+    let (stdout, _, success) = run_ffind(&["--lines", "--limit", "4", "--json", "txt"], &dir.path);
     assert!(success);
     let records: Vec<serde_json::Value> = stdout
         .lines()
@@ -572,11 +595,17 @@ fn test_newer_older_than() {
     let ten_days_ago = now - Duration::from_secs(10 * 86400);
     let one_hour_ago = now - Duration::from_secs(3600);
 
-    let old_file = std::fs::File::options().append(true).open(&old_path).unwrap();
+    let old_file = std::fs::File::options()
+        .append(true)
+        .open(&old_path)
+        .unwrap();
     old_file
         .set_times(FileTimes::new().set_modified(ten_days_ago))
         .unwrap();
-    let new_file = std::fs::File::options().append(true).open(&new_path).unwrap();
+    let new_file = std::fs::File::options()
+        .append(true)
+        .open(&new_path)
+        .unwrap();
     new_file
         .set_times(FileTimes::new().set_modified(one_hour_ago))
         .unwrap();

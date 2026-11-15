@@ -43,7 +43,12 @@ impl Node {
         }
     }
 
-    fn render(&self, writer: &mut impl Write, prefix: &str, colorizer: &Colorizer) -> io::Result<()> {
+    fn render(
+        &self,
+        writer: &mut impl Write,
+        prefix: &str,
+        colorizer: &Colorizer,
+    ) -> io::Result<()> {
         let dir_count = self.dirs.len();
         let total = dir_count + self.files.len();
 

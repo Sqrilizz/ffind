@@ -1,7 +1,5 @@
 #[cfg(not(target_os = "linux"))]
-compile_error!(
-    "ffind only supports Linux: it uses the getdents64 and statx syscalls directly"
-);
+compile_error!("ffind only supports Linux: it uses the getdents64 and statx syscalls directly");
 
 mod cli;
 mod color;

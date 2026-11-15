@@ -69,11 +69,7 @@ pub struct Cli {
     #[arg(long = "hash", requires = "json")]
     pub hash: bool,
 
-    #[arg(
-        long = "hash-max-size",
-        value_name = "SIZE",
-        requires = "hash"
-    )]
+    #[arg(long = "hash-max-size", value_name = "SIZE", requires = "hash")]
     pub hash_max_size: Option<String>,
 
     #[arg(long = "empty")]

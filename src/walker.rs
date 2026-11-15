@@ -64,11 +64,7 @@ struct DirTask {
 /// The limit is only enforced when matches are executed inline (`-X`); in
 /// streaming mode the printer enforces it exactly, and in collector mode
 /// results are truncated after collection.
-fn acquire_match_slot(
-    counter: &AtomicUsize,
-    stop_flag: &AtomicBool,
-    limit: Option<usize>,
-) -> bool {
+fn acquire_match_slot(counter: &AtomicUsize, stop_flag: &AtomicBool, limit: Option<usize>) -> bool {
     match limit {
         Some(max) => {
             let prev = counter.fetch_add(1, Ordering::Relaxed);
@@ -423,9 +419,13 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
     if let Some(name) = root_path.file_name() {
         let match_score = ctx.matcher.matches(name.as_bytes(), raw_type);
 
-        if let Some(mut stats) =
-            root_evaluator.evaluate(match_score, raw_type, &root_path, 0, meta.permissions().mode())
-        {
+        if let Some(mut stats) = root_evaluator.evaluate(
+            match_score,
+            raw_type,
+            &root_path,
+            0,
+            meta.permissions().mode(),
+        ) {
             if root_sink.acquire() {
                 root_evaluator.fill_heavy(&mut stats, raw_type, &root_path);
                 root_sink.emit(&root_path, raw_type, stats);
@@ -612,7 +612,11 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                                 0,
                             ) {
                                 if sink.acquire() {
-                                    evaluator.fill_heavy(&mut stats, effective_raw_type, &child_path);
+                                    evaluator.fill_heavy(
+                                        &mut stats,
+                                        effective_raw_type,
+                                        &child_path,
+                                    );
                                     sink.emit(&child_path, effective_raw_type, stats);
                                 }
                             }
