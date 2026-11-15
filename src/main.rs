@@ -1,3 +1,8 @@
+#[cfg(not(target_os = "linux"))]
+compile_error!(
+    "ffind only supports Linux: it uses the getdents64 and statx syscalls directly"
+);
+
 mod cli;
 mod color;
 mod dirent;
@@ -91,6 +96,7 @@ fn main() -> Result<()> {
         exclude,
         root_dev,
         executor,
+        limit: cli.limit,
         stop_flag: Arc::clone(&stop_flag),
         match_counter: Arc::clone(&match_counter),
         needs_stat,

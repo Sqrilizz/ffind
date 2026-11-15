@@ -39,6 +39,7 @@ pub struct WalkContext {
     pub exclude: Arc<Vec<String>>,
     pub root_dev: Option<u64>,
     pub executor: Option<Arc<CommandExecutor>>,
+    pub limit: Option<usize>,
     pub stop_flag: Arc<AtomicBool>,
     pub match_counter: Arc<AtomicUsize>,
     pub needs_stat: bool,
@@ -52,6 +53,33 @@ struct DirTask {
     depth: usize,
     gitignores: Arc<Vec<Gitignore>>,
     ancestors: Option<Arc<HashSet<(u64, u64)>>>,
+}
+
+/// Registers a match and returns whether it may be emitted.
+///
+/// The limit is only enforced when matches are executed inline (`-X`); in
+/// streaming mode the printer enforces it exactly, and in collector mode
+/// results are truncated after collection.
+fn acquire_match_slot(
+    counter: &AtomicUsize,
+    stop_flag: &AtomicBool,
+    limit: Option<usize>,
+) -> bool {
+    match limit {
+        Some(max) => {
+            if counter.load(Ordering::Relaxed) < max {
+                counter.fetch_add(1, Ordering::Relaxed);
+                true
+            } else {
+                stop_flag.store(true, Ordering::Relaxed);
+                false
+            }
+        }
+        None => {
+            counter.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+    }
 }
 
 fn find_task<T>(local: &Worker<T>, injector: &Injector<T>, stealers: &[Stealer<T>]) -> Option<T> {
@@ -129,6 +157,8 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
         RawType::Other
     };
 
+    let walker_limit = if ctx.executor.is_some() { ctx.limit } else { None };
+
     if let Some(name) = root_path.file_name() {
         if let Some(match_score) = ctx.matcher.matches(name.as_bytes(), raw_type) {
             let mut matches_all = true;
@@ -196,8 +226,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                 }
             }
 
-            if matches_all {
-                ctx.match_counter.fetch_add(1, Ordering::Relaxed);
+            if matches_all && acquire_match_slot(&ctx.match_counter, &ctx.stop_flag, walker_limit) {
                 if let Some(exec) = &ctx.executor {
                     let _ = exec.execute(&root_path);
                 } else {
@@ -316,6 +345,14 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                     let is_at_root_mount = task_path == Path::new("/");
 
                     let _ = reader.read_entries(&task_path, |entry| {
+                        // Entries deeper than --max-depth are never matched
+                        // (find -maxdepth semantics: the start point is depth 0).
+                        if let Some(max) = max_depth {
+                            if next_depth > max {
+                                return Ok(());
+                            }
+                        }
+
                         if !hidden && entry.name.first() == Some(&b'.') {
                             return Ok(());
                         }
@@ -443,8 +480,13 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                                 }
                             }
 
-                            if matches_all {
-                                match_counter.fetch_add(1, Ordering::Relaxed);
+                            if matches_all
+                                && acquire_match_slot(
+                                    &match_counter,
+                                    &stop_flag,
+                                    walker_limit,
+                                )
+                            {
                                 if let Some(exec) = &executor {
                                     let _ = exec.execute(&child_path);
                                 } else {
@@ -466,7 +508,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
 
                         if is_directory {
                             let can_recurse = match max_depth {
-                                Some(max) => next_depth <= max,
+                                Some(max) => next_depth < max,
                                 None => true,
                             };
 
