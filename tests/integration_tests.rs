@@ -334,3 +334,83 @@ fn test_exec_batch_single_invocation() {
     assert_eq!(lines.len(), 1, "batch should run exactly one command");
     assert!(lines[0].contains("a.txt") && lines[0].contains("b.txt"));
 }
+
+#[test]
+fn test_sort_lines_descending() {
+    let dir = TempTestDir::new("sort_lines");
+    dir.create_file("one.txt", b"a\n");
+    dir.create_file("five.txt", b"1\n2\n3\n4\n5\n");
+    dir.create_file("ten.txt", b"1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n");
+
+    let (stdout, _, success) = run_ffind(&["txt", "--sort", "lines", "--json"], &dir.path);
+    assert!(success);
+    let paths: Vec<String> = stdout
+        .lines()
+        .map(|l| {
+            serde_json::from_str::<serde_json::Value>(l).unwrap()["path"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(paths.len(), 3);
+    assert!(paths[0].ends_with("ten.txt"), "got: {paths:?}");
+    assert!(paths[1].ends_with("five.txt"));
+    assert!(paths[2].ends_with("one.txt"));
+}
+
+#[test]
+fn test_summary_total_lines() {
+    let dir = TempTestDir::new("summary_lines");
+    dir.create_file("a.txt", b"1\n2\n3\n");
+    dir.create_file("b.txt", b"1\n2\n");
+    dir.create_dir("sub");
+    dir.create_file("sub/c.txt", b"1\n");
+
+    let (stdout, stderr, success) = run_ffind(&["--lines", "--summary", "txt"], &dir.path);
+    assert!(success);
+    assert_eq!(stdout.lines().count(), 3);
+    assert!(stderr.contains("Total lines: 6"), "stderr: {stderr}");
+
+    let (stdout_noflag, stderr_noflag, success2) = run_ffind(&["--summary", "txt"], &dir.path);
+    assert!(success2);
+    assert!(!stderr_noflag.contains("Total lines"), "stderr: {stderr_noflag}");
+    assert_eq!(stdout_noflag.lines().count(), 3);
+}
+
+#[test]
+fn test_lines_binary_files_are_skipped() {
+    let dir = TempTestDir::new("lines_binary");
+    dir.create_file("text.txt", b"one\ntwo\n");
+    dir.create_file("blob.bin", b"ab\0cd\0ef\ngh\n");
+
+    let (stdout, _, success) = run_ffind(&["--lines", "--json", ""], &dir.path);
+    assert!(success);
+    let records: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+
+    let text = records
+        .iter()
+        .find(|r| r["path"].as_str().unwrap().ends_with("text.txt"))
+        .unwrap();
+    assert_eq!(text["lines"].as_u64(), Some(2));
+
+    let blob = records
+        .iter()
+        .find(|r| r["path"].as_str().unwrap().ends_with("blob.bin"))
+        .unwrap();
+    assert!(blob.get("lines").is_none(), "binary file must not report lines");
+}
+
+#[test]
+fn test_lines_without_flag_stays_free() {
+    let dir = TempTestDir::new("lines_free");
+    dir.create_file("a.txt", b"1\n2\n");
+
+    let (stdout, _, success) = run_ffind(&["--json", "txt"], &dir.path);
+    assert!(success);
+    let record: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
+    assert!(record.get("lines").is_none(), "no line work without --lines");
+}

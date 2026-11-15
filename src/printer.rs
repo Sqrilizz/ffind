@@ -19,6 +19,7 @@ pub struct PrintConfig {
     pub print0: bool,
     pub limit: Option<usize>,
     pub summary: bool,
+    pub lines: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -30,6 +31,8 @@ struct JsonRecord<'a> {
     mtime: i64,
     mode: u32,
     is_exec: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lines: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     score: Option<i32>,
 }
@@ -53,6 +56,11 @@ pub fn write_record<W: Write>(
             path: &record.path,
             raw_type,
             size: record.size,
+            lines: if record.lines != 0 {
+                Some(record.lines)
+            } else {
+                None
+            },
             mtime: record.mtime_sec,
             mode: record.mode,
             is_exec: record.is_exec,
@@ -102,11 +110,16 @@ pub struct Summary {
     pub other: usize,
     pub total_file_size: u64,
     pub largest_file: Option<(PathBuf, u64)>,
+    pub count_lines: bool,
+    pub total_lines: u64,
 }
 
 impl Summary {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(count_lines: bool) -> Self {
+        Self {
+            count_lines,
+            ..Self::default()
+        }
     }
 
     pub fn update(&mut self, record: &MatchRecord) {
@@ -114,6 +127,7 @@ impl Summary {
             RawType::File => {
                 self.files += 1;
                 self.total_file_size += record.size;
+                self.total_lines += record.lines;
                 match &self.largest_file {
                     Some((_, max_size)) if record.size <= *max_size => {}
                     _ => {
@@ -152,6 +166,9 @@ impl Summary {
         if self.symlinks > 0 {
             eprintln!("Symlinks: {}", self.symlinks);
         }
+        if self.count_lines {
+            eprintln!("Total lines: {}", self.total_lines);
+        }
         eprintln!("Total size: {}", total_size_str.trim());
         if let Some((path, size)) = &self.largest_file {
             let size_str = format_size(*size, RawType::File);
@@ -180,7 +197,7 @@ impl PrinterHandle {
             let delimiter = if config.print0 { b'\0' } else { b'\n' };
             let mut count = 0usize;
             let mut summary = if config.summary {
-                Some(Summary::new())
+                Some(Summary::new(config.lines))
             } else {
                 None
             };
@@ -253,11 +270,12 @@ mod tests {
 
     #[test]
     fn test_summary_accumulation() {
-        let mut summary = Summary::new();
+        let mut summary = Summary::new(true);
         summary.update(&MatchRecord {
             path: PathBuf::from("dir1"),
             raw_type: RawType::Directory,
             size: 4096,
+            lines: 0,
             mtime_sec: 0,
             mode: 0o755,
             is_exec: false,
@@ -267,6 +285,7 @@ mod tests {
             path: PathBuf::from("file1.txt"),
             raw_type: RawType::File,
             size: 1000,
+            lines: 10,
             mtime_sec: 0,
             mode: 0o644,
             is_exec: false,
@@ -276,6 +295,7 @@ mod tests {
             path: PathBuf::from("file2.txt"),
             raw_type: RawType::File,
             size: 5000,
+            lines: 50,
             mtime_sec: 0,
             mode: 0o644,
             is_exec: false,
@@ -285,6 +305,7 @@ mod tests {
         assert_eq!(summary.files, 2);
         assert_eq!(summary.directories, 1);
         assert_eq!(summary.total_file_size, 6000);
+        assert_eq!(summary.total_lines, 60);
         assert_eq!(
             summary.largest_file,
             Some((PathBuf::from("file2.txt"), 5000))
@@ -298,6 +319,7 @@ mod tests {
             path: PathBuf::from("src/main.rs"),
             raw_type: RawType::File,
             size: 1234,
+            lines: 42,
             mtime_sec: 1700000000,
             mode: 0o100644,
             is_exec: false,

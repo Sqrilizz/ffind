@@ -138,7 +138,8 @@ ffind -L target.txt
 | `--json` | Output matches as streaming JSON lines |
 | `-l, --long` | Detailed listing: permissions, size, modification time, colored path |
 | `--summary` | Print summary statistics to `stderr` (count, total size, largest, average) |
-| `--sort <size\|mtime\|name\|score>` | Sort collected results (score sorts by fuzzy relevance) |
+| `--lines` | Count newlines of matched files (binary files are skipped); enables `--sort lines` and adds total lines to `--summary` |
+| `--sort <size\|mtime\|name\|lines\|score>` | Sort collected results (score sorts by fuzzy relevance) |
 | `-R, --reverse` | Reverse sorting order |
 | `--limit <NUM>` | Limit number of results (stops traversal early) |
 | `-j, --threads <NUM>` | Set number of worker threads (default: available CPU cores) |
@@ -198,6 +199,26 @@ Pipeline usage without stdout corruption:
 ```bash
 ffind --summary rs | wc -l
 # Prints 10 to stdout while displaying the summary block in stderr
+```
+
+### Project Line Count
+```bash
+ffind --lines -e rs --summary
+```
+Output:
+```
+--- Summary ---
+Total matches: 10
+Files: 10
+Directories: 0
+Total lines: 847
+Total size: 63.6 KiB
+...
+```
+
+Sort files by line count, largest first:
+```bash
+ffind --lines -e rs --sort lines --limit 5
 ```
 
 ### Batch Command Execution

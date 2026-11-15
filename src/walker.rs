@@ -11,6 +11,7 @@ use anyhow::Result;
 use crossbeam_channel::Sender;
 use crossbeam_deque::{Injector, Stealer, Worker};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use std::io::Read;
 
 use crate::cli::Cli;
 use crate::dirent::DirectoryReader;
@@ -25,6 +26,7 @@ pub struct MatchRecord {
     pub path: PathBuf,
     pub raw_type: RawType,
     pub size: u64,
+    pub lines: u64,
     pub mtime_sec: i64,
     pub mode: u32,
     pub is_exec: bool,
@@ -40,6 +42,7 @@ pub struct WalkContext {
     pub root_dev: Option<u64>,
     pub executor: Option<Arc<CommandExecutor>>,
     pub limit: Option<usize>,
+    pub needs_lines: bool,
     pub stop_flag: Arc<AtomicBool>,
     pub match_counter: Arc<AtomicUsize>,
     pub needs_stat: bool,
@@ -89,6 +92,7 @@ struct EntryFilters {
     size_filter: Option<SizeFilter>,
     time_filter: Option<TimeFilter>,
     needs_stat: bool,
+    needs_lines: bool,
     empty: bool,
     follow: bool,
 }
@@ -96,6 +100,7 @@ struct EntryFilters {
 struct EntryStats {
     score: i32,
     size: u64,
+    lines: u64,
     mtime_sec: i64,
     mode: u32,
     is_exec: bool,
@@ -113,6 +118,27 @@ impl EntryEvaluator {
             filters,
             read_buf: vec![0u8; READ_BUF_SIZE],
             lower_buf: Vec::new(),
+        }
+    }
+
+    fn count_lines(&mut self, path: &Path) -> u64 {
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return 0;
+        };
+
+        let mut lines = 0u64;
+        loop {
+            let Ok(n) = file.read(&mut self.read_buf) else {
+                return 0;
+            };
+            if n == 0 {
+                return lines;
+            }
+            let chunk = &self.read_buf[..n];
+            if memchr::memchr(0, chunk).is_some() {
+                return 0;
+            }
+            lines += memchr::memchr_iter(b'\n', chunk).count() as u64;
         }
     }
 
@@ -192,10 +218,20 @@ impl EntryEvaluator {
             }
         }
 
+        let mut lines = 0u64;
+        if matches_all && self.filters.needs_lines {
+            lines = if raw_type == RawType::File {
+                self.count_lines(path)
+            } else {
+                0
+            };
+        }
+
         if matches_all {
             Some(EntryStats {
                 score,
                 size,
+                lines,
                 mtime_sec,
                 mode,
                 is_exec,
@@ -229,6 +265,7 @@ impl MatchSink<'_> {
             path: path.to_path_buf(),
             raw_type,
             size: stats.size,
+            lines: stats.lines,
             mtime_sec: stats.mtime_sec,
             mode: stats.mode,
             is_exec: stats.is_exec,
@@ -323,6 +360,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
         size_filter: ctx.size_filter,
         time_filter: ctx.time_filter,
         needs_stat: ctx.needs_stat,
+        needs_lines: ctx.needs_lines,
         empty: ctx.empty,
         follow: ctx.follow,
     };

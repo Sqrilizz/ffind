@@ -18,6 +18,7 @@ pub enum SortBy {
     Size,
     Mtime,
     Name,
+    Lines,
     Score,
 }
 
@@ -72,6 +73,9 @@ pub struct Cli {
 
     #[arg(long = "summary")]
     pub summary: bool,
+
+    #[arg(long = "lines")]
+    pub lines: bool,
 
     #[arg(long = "sort", value_enum, value_name = "CRITERIA")]
     pub sort: Option<SortBy>,

@@ -87,6 +87,7 @@ fn main() -> Result<()> {
     let match_counter = Arc::new(AtomicUsize::new(0));
 
     let needs_stat = cli.long || cli.sort.is_some() || cli.summary || cli.empty || cli.json;
+    let needs_lines = cli.lines || cli.sort == Some(SortBy::Lines);
 
     let ctx = WalkContext {
         matcher,
@@ -97,6 +98,7 @@ fn main() -> Result<()> {
         root_dev,
         executor,
         limit: cli.limit,
+        needs_lines,
         stop_flag: Arc::clone(&stop_flag),
         match_counter: Arc::clone(&match_counter),
         needs_stat,
@@ -114,6 +116,7 @@ fn main() -> Result<()> {
             print0: cli.print0,
             limit: cli.limit,
             summary: cli.summary,
+            lines: needs_lines,
         };
         Some(PrinterHandle::new(
             receiver.clone(),
@@ -162,6 +165,13 @@ fn main() -> Result<()> {
                         records.sort_by(|a, b| a.path.cmp(&b.path));
                     }
                 }
+                SortBy::Lines => {
+                    if cli.reverse {
+                        records.sort_by_key(|r| r.lines);
+                    } else {
+                        records.sort_by_key(|r| Reverse(r.lines));
+                    }
+                }
                 SortBy::Score => {
                     if cli.reverse {
                         records.sort_by_key(|r| r.score);
@@ -177,7 +187,7 @@ fn main() -> Result<()> {
         }
 
         let mut summary = if cli.summary {
-            Some(Summary::new())
+            Some(Summary::new(needs_lines))
         } else {
             None
         };

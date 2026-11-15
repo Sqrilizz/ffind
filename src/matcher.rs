@@ -371,6 +371,7 @@ mod tests {
             threads: None,
             print0: false,
             time: false,
+            lines: false,
             exec: None,
             exec_batch: None,
             generate_completions: None,
