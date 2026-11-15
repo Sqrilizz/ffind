@@ -82,6 +82,164 @@ fn acquire_match_slot(
     }
 }
 
+#[derive(Clone)]
+struct EntryFilters {
+    min_depth: Option<usize>,
+    content_matcher: Option<Arc<ContentMatcher>>,
+    size_filter: Option<SizeFilter>,
+    time_filter: Option<TimeFilter>,
+    needs_stat: bool,
+    empty: bool,
+    follow: bool,
+}
+
+struct EntryStats {
+    score: i32,
+    size: u64,
+    mtime_sec: i64,
+    mode: u32,
+    is_exec: bool,
+}
+
+struct EntryEvaluator {
+    filters: EntryFilters,
+    read_buf: Vec<u8>,
+    lower_buf: Vec<u8>,
+}
+
+impl EntryEvaluator {
+    fn new(filters: EntryFilters) -> Self {
+        Self {
+            filters,
+            read_buf: vec![0u8; READ_BUF_SIZE],
+            lower_buf: Vec::new(),
+        }
+    }
+
+    fn evaluate(
+        &mut self,
+        match_score: Option<i32>,
+        raw_type: RawType,
+        path: &Path,
+        depth: usize,
+        initial_mode: u32,
+    ) -> Option<EntryStats> {
+        let score = match_score?;
+
+        let mut matches_all = true;
+
+        if let Some(min) = self.filters.min_depth {
+            if depth < min {
+                matches_all = false;
+            }
+        }
+
+        if let Some(cm) = &self.filters.content_matcher {
+            if raw_type == RawType::File {
+                if !cm.matches_file(path, &mut self.read_buf, &mut self.lower_buf) {
+                    matches_all = false;
+                }
+            } else {
+                matches_all = false;
+            }
+        }
+
+        let mut size = 0u64;
+        let mut mtime_sec = 0i64;
+        let mut mode = initial_mode;
+        let mut is_exec = (mode & 0o111) != 0;
+
+        if self.filters.needs_stat
+            || self.filters.size_filter.is_some()
+            || self.filters.time_filter.is_some()
+        {
+            if let Ok(file_meta) = query_statx(path, self.filters.follow) {
+                size = file_meta.size;
+                mtime_sec = file_meta.mtime_sec;
+                mode = file_meta.mode;
+                is_exec = file_meta.is_executable;
+
+                if let Some(sf) = self.filters.size_filter {
+                    if !sf.matches(size) {
+                        matches_all = false;
+                    }
+                }
+                if let Some(tf) = self.filters.time_filter {
+                    if !tf.matches(mtime_sec) {
+                        matches_all = false;
+                    }
+                }
+            } else if self.filters.size_filter.is_some() || self.filters.time_filter.is_some() {
+                matches_all = false;
+            }
+        }
+
+        if self.filters.empty {
+            match raw_type {
+                RawType::File => {
+                    if size != 0 {
+                        matches_all = false;
+                    }
+                }
+                RawType::Directory => {
+                    if !is_dir_empty(path) {
+                        matches_all = false;
+                    }
+                }
+                _ => {
+                    matches_all = false;
+                }
+            }
+        }
+
+        if matches_all {
+            Some(EntryStats {
+                score,
+                size,
+                mtime_sec,
+                mode,
+                is_exec,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+struct MatchSink<'a> {
+    counter: &'a AtomicUsize,
+    stop_flag: &'a AtomicBool,
+    limit: Option<usize>,
+    executor: Option<&'a CommandExecutor>,
+    sender: &'a Sender<MatchRecord>,
+}
+
+impl MatchSink<'_> {
+    fn emit(&self, path: &Path, raw_type: RawType, stats: EntryStats) {
+        if !acquire_match_slot(self.counter, self.stop_flag, self.limit) {
+            return;
+        }
+
+        if let Some(exec) = self.executor {
+            let _ = exec.execute(path);
+            return;
+        }
+
+        let record = MatchRecord {
+            path: path.to_path_buf(),
+            raw_type,
+            size: stats.size,
+            mtime_sec: stats.mtime_sec,
+            mode: stats.mode,
+            is_exec: stats.is_exec,
+            score: stats.score,
+        };
+        if self.sender.send(record).is_err() {
+            self.stop_flag.store(true, Ordering::Relaxed);
+        }
+    }
+}
+
 fn find_task<T>(local: &Worker<T>, injector: &Injector<T>, stealers: &[Stealer<T>]) -> Option<T> {
     if let Some(task) = local.pop() {
         return Some(task);
@@ -159,89 +317,32 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
 
     let walker_limit = if ctx.executor.is_some() { ctx.limit } else { None };
 
+    let filters = EntryFilters {
+        min_depth: ctx.min_depth,
+        content_matcher: ctx.content_matcher.clone(),
+        size_filter: ctx.size_filter,
+        time_filter: ctx.time_filter,
+        needs_stat: ctx.needs_stat,
+        empty: ctx.empty,
+        follow: ctx.follow,
+    };
+
+    let mut root_evaluator = EntryEvaluator::new(filters.clone());
+    let root_sink = MatchSink {
+        counter: &ctx.match_counter,
+        stop_flag: &ctx.stop_flag,
+        limit: walker_limit,
+        executor: ctx.executor.as_deref(),
+        sender: &sender,
+    };
+
     if let Some(name) = root_path.file_name() {
-        if let Some(match_score) = ctx.matcher.matches(name.as_bytes(), raw_type) {
-            let mut matches_all = true;
+        let match_score = ctx.matcher.matches(name.as_bytes(), raw_type);
 
-            if let Some(min) = ctx.min_depth {
-                if min > 0 {
-                    matches_all = false;
-                }
-            }
-
-            if let Some(cm) = &ctx.content_matcher {
-                if raw_type == RawType::File {
-                    let mut buf = vec![0u8; READ_BUF_SIZE];
-                    let mut lower = Vec::new();
-                    if !cm.matches_file(&root_path, &mut buf, &mut lower) {
-                        matches_all = false;
-                    }
-                } else {
-                    matches_all = false;
-                }
-            }
-
-            let mut file_size = 0u64;
-            let mut file_mtime = 0i64;
-            let mut file_mode = meta.permissions().mode();
-            let mut is_exec = (file_mode & 0o111) != 0;
-
-            if ctx.needs_stat || ctx.size_filter.is_some() || ctx.time_filter.is_some() {
-                if let Ok(file_meta) = query_statx(&root_path, true, true, ctx.follow) {
-                    file_size = file_meta.size;
-                    file_mtime = file_meta.mtime_sec;
-                    file_mode = file_meta.mode;
-                    is_exec = file_meta.is_executable;
-
-                    if let Some(sf) = ctx.size_filter {
-                        if !sf.matches(file_size) {
-                            matches_all = false;
-                        }
-                    }
-                    if let Some(tf) = ctx.time_filter {
-                        if !tf.matches(file_mtime) {
-                            matches_all = false;
-                        }
-                    }
-                } else if ctx.size_filter.is_some() || ctx.time_filter.is_some() {
-                    matches_all = false;
-                }
-            }
-
-            if ctx.empty {
-                match raw_type {
-                    RawType::File => {
-                        if file_size != 0 {
-                            matches_all = false;
-                        }
-                    }
-                    RawType::Directory => {
-                        if !is_dir_empty(&root_path) {
-                            matches_all = false;
-                        }
-                    }
-                    _ => {
-                        matches_all = false;
-                    }
-                }
-            }
-
-            if matches_all && acquire_match_slot(&ctx.match_counter, &ctx.stop_flag, walker_limit) {
-                if let Some(exec) = &ctx.executor {
-                    let _ = exec.execute(&root_path);
-                } else {
-                    let record = MatchRecord {
-                        path: root_path.clone(),
-                        raw_type,
-                        size: file_size,
-                        mtime_sec: file_mtime,
-                        mode: file_mode,
-                        is_exec,
-                        score: match_score,
-                    };
-                    let _ = sender.send(record);
-                }
-            }
+        if let Some(stats) =
+            root_evaluator.evaluate(match_score, raw_type, &root_path, 0, meta.permissions().mode())
+        {
+            root_sink.emit(&root_path, raw_type, stats);
         }
     }
 
@@ -300,18 +401,13 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
         let active_threads = Arc::clone(&active_threads);
         let stop_flag = Arc::clone(&ctx.stop_flag);
         let matcher = Arc::clone(&ctx.matcher);
-        let content_matcher = ctx.content_matcher.as_ref().map(Arc::clone);
         let executor = ctx.executor.as_ref().map(Arc::clone);
         let exclude = Arc::clone(&ctx.exclude);
         let sender = sender.clone();
         let match_counter = Arc::clone(&ctx.match_counter);
-        let size_filter = ctx.size_filter;
-        let time_filter = ctx.time_filter;
         let root_dev = ctx.root_dev;
-        let needs_stat = ctx.needs_stat;
-        let empty = ctx.empty;
-        let min_depth = ctx.min_depth;
         let follow = ctx.follow;
+        let filters = filters.clone();
         let hidden = cli.hidden;
         let no_ignore = cli.no_ignore;
         let max_depth = cli.max_depth;
@@ -325,8 +421,14 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
 
         let handle = thread::spawn(move || {
             let mut reader = DirectoryReader::new();
-            let mut read_buf = vec![0u8; READ_BUF_SIZE];
-            let mut lower_buf = Vec::with_capacity(READ_BUF_SIZE);
+            let mut evaluator = EntryEvaluator::new(filters);
+            let sink = MatchSink {
+                counter: &match_counter,
+                stop_flag: &stop_flag,
+                limit: walker_limit,
+                executor: executor.as_deref(),
+                sender: &sender,
+            };
             let mut was_active = false;
 
             loop {
@@ -415,94 +517,14 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                         }
 
                         if entry_matched {
-                            let mut matches_all = true;
-
-                            if let Some(min) = min_depth {
-                                if next_depth < min {
-                                    matches_all = false;
-                                }
-                            }
-
-                            if let Some(cm) = &content_matcher {
-                                if effective_raw_type == RawType::File {
-                                    if !cm.matches_file(&child_path, &mut read_buf, &mut lower_buf)
-                                    {
-                                        matches_all = false;
-                                    }
-                                } else {
-                                    matches_all = false;
-                                }
-                            }
-
-                            let mut file_size = 0u64;
-                            let mut file_mtime = 0i64;
-                            let mut file_mode = 0u32;
-                            let mut is_exec = false;
-
-                            if needs_stat || size_filter.is_some() || time_filter.is_some() {
-                                if let Ok(file_meta) = query_statx(&child_path, true, true, follow)
-                                {
-                                    file_size = file_meta.size;
-                                    file_mtime = file_meta.mtime_sec;
-                                    file_mode = file_meta.mode;
-                                    is_exec = file_meta.is_executable;
-
-                                    if let Some(sf) = size_filter {
-                                        if !sf.matches(file_size) {
-                                            matches_all = false;
-                                        }
-                                    }
-                                    if let Some(tf) = time_filter {
-                                        if !tf.matches(file_mtime) {
-                                            matches_all = false;
-                                        }
-                                    }
-                                } else if size_filter.is_some() || time_filter.is_some() {
-                                    matches_all = false;
-                                }
-                            }
-
-                            if empty {
-                                match effective_raw_type {
-                                    RawType::File => {
-                                        if file_size != 0 {
-                                            matches_all = false;
-                                        }
-                                    }
-                                    RawType::Directory => {
-                                        if !is_dir_empty(&child_path) {
-                                            matches_all = false;
-                                        }
-                                    }
-                                    _ => {
-                                        matches_all = false;
-                                    }
-                                }
-                            }
-
-                            if matches_all
-                                && acquire_match_slot(
-                                    &match_counter,
-                                    &stop_flag,
-                                    walker_limit,
-                                )
-                            {
-                                if let Some(exec) = &executor {
-                                    let _ = exec.execute(&child_path);
-                                } else {
-                                    let record = MatchRecord {
-                                        path: child_path.clone(),
-                                        raw_type: effective_raw_type,
-                                        size: file_size,
-                                        mtime_sec: file_mtime,
-                                        mode: file_mode,
-                                        is_exec,
-                                        score: match_score.unwrap_or(0),
-                                    };
-                                    if sender.send(record).is_err() {
-                                        stop_flag.store(true, Ordering::Relaxed);
-                                    }
-                                }
+                            if let Some(stats) = evaluator.evaluate(
+                                match_score,
+                                effective_raw_type,
+                                &child_path,
+                                next_depth,
+                                0,
+                            ) {
+                                sink.emit(&child_path, effective_raw_type, stats);
                             }
                         }
 

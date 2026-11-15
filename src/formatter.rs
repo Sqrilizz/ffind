@@ -8,34 +8,11 @@ pub fn format_mode(mode: u32, raw_type: RawType) -> String {
         _ => '-',
     };
 
-    if mode & 0o400 != 0 {
-        chars[1] = 'r';
-    }
-    if mode & 0o200 != 0 {
-        chars[2] = 'w';
-    }
-    if mode & 0o100 != 0 {
-        chars[3] = 'x';
-    }
-
-    if mode & 0o040 != 0 {
-        chars[4] = 'r';
-    }
-    if mode & 0o020 != 0 {
-        chars[5] = 'w';
-    }
-    if mode & 0o010 != 0 {
-        chars[6] = 'x';
-    }
-
-    if mode & 0o004 != 0 {
-        chars[7] = 'r';
-    }
-    if mode & 0o002 != 0 {
-        chars[8] = 'w';
-    }
-    if mode & 0o001 != 0 {
-        chars[9] = 'x';
+    const RWX: [char; 3] = ['r', 'w', 'x'];
+    for position in 0..9 {
+        if mode & (1 << (8 - position)) != 0 {
+            chars[1 + position] = RWX[position % 3];
+        }
     }
 
     chars.into_iter().collect()

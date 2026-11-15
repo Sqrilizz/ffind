@@ -133,9 +133,7 @@ fn main() -> Result<()> {
         None
     };
 
-    let walker_sender = sender;
-    let walk_result = walker::walk(&cli, ctx, walker_sender);
-
+    let walk_result = walker::walk(&cli, ctx, sender);
     let summary = if let Some(collector) = collector_handle {
         let mut records = collector
             .join()

@@ -137,22 +137,11 @@ pub struct FileMeta {
     pub is_executable: bool,
 }
 
-pub fn query_statx(
-    path: &Path,
-    need_size: bool,
-    need_mtime: bool,
-    follow_symlinks: bool,
-) -> Result<FileMeta> {
+pub fn query_statx(path: &Path, follow_symlinks: bool) -> Result<FileMeta> {
     let path_bytes = path.as_os_str().as_bytes();
     let c_path = CString::new(path_bytes).context("path contains null byte")?;
 
-    let mut mask = libc::STATX_MODE;
-    if need_size {
-        mask |= libc::STATX_SIZE;
-    }
-    if need_mtime {
-        mask |= libc::STATX_MTIME;
-    }
+    let mask = libc::STATX_MODE | libc::STATX_SIZE | libc::STATX_MTIME;
 
     let flags = if follow_symlinks {
         0
@@ -270,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_query_statx_current_file() {
-        let meta = query_statx(Path::new("Cargo.toml"), true, true, false).unwrap();
+        let meta = query_statx(Path::new("Cargo.toml"), false).unwrap();
         assert!(meta.size > 0);
         assert!(meta.mtime_sec > 0);
         assert!(meta.mode > 0);
