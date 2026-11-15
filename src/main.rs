@@ -167,9 +167,9 @@ fn main() -> Result<()> {
                 }
                 SortBy::Lines => {
                     if cli.reverse {
-                        records.sort_by_key(|r| r.lines);
+                        records.sort_by_key(|r| r.lines.unwrap_or(0));
                     } else {
-                        records.sort_by_key(|r| Reverse(r.lines));
+                        records.sort_by_key(|r| Reverse(r.lines.unwrap_or(0)));
                     }
                 }
                 SortBy::Score => {

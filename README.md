@@ -138,10 +138,10 @@ ffind -L target.txt
 | `--json` | Output matches as streaming JSON lines |
 | `-l, --long` | Detailed listing: permissions, size, modification time, colored path |
 | `--summary` | Print summary statistics to `stderr` (count, total size, largest, average) |
-| `--lines` | Count newlines of matched files (binary files are skipped); enables `--sort lines` and adds total lines to `--summary` |
+| `--lines` | Count newlines of matched files (streamed in fixed 64 KiB chunks; binary files detected by NUL in the first chunk report 0); enables `--sort lines` and adds total lines to `--summary` |
 | `--sort <size\|mtime\|name\|lines\|score>` | Sort collected results (score sorts by fuzzy relevance) |
 | `-R, --reverse` | Reverse sorting order |
-| `--limit <NUM>` | Limit number of results (stops traversal early) |
+| `--limit <NUM>` | Limit number of results. Stops traversal early in streaming mode; with `--sort` or `--exec-batch` the tree is walked fully and results are cut after sorting/collection |
 | `-j, --threads <NUM>` | Set number of worker threads (default: available CPU cores) |
 | `-0, --print0` | Delimit results with a null byte (for `xargs -0`) |
 | `--color <auto\|always\|never>` | Control colored output (respects `LS_COLORS`) |

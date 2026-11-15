@@ -379,10 +379,11 @@ fn test_summary_total_lines() {
 }
 
 #[test]
-fn test_lines_binary_files_are_skipped() {
+fn test_lines_binary_files_report_zero() {
     let dir = TempTestDir::new("lines_binary");
     dir.create_file("text.txt", b"one\ntwo\n");
     dir.create_file("blob.bin", b"ab\0cd\0ef\ngh\n");
+    dir.create_file("noeol.txt", b"single line without trailing newline");
 
     let (stdout, _, success) = run_ffind(&["--lines", "--json", ""], &dir.path);
     assert!(success);
@@ -401,7 +402,21 @@ fn test_lines_binary_files_are_skipped() {
         .iter()
         .find(|r| r["path"].as_str().unwrap().ends_with("blob.bin"))
         .unwrap();
-    assert!(blob.get("lines").is_none(), "binary file must not report lines");
+    assert_eq!(
+        blob["lines"].as_u64(),
+        Some(0),
+        "binary files must report lines: 0 when --lines is on"
+    );
+
+    let noeol = records
+        .iter()
+        .find(|r| r["path"].as_str().unwrap().ends_with("noeol.txt"))
+        .unwrap();
+    assert_eq!(
+        noeol["lines"].as_u64(),
+        Some(0),
+        "field must be present even when the count is 0 (wc -l semantics)"
+    );
 }
 
 #[test]
@@ -413,4 +428,23 @@ fn test_lines_without_flag_stays_free() {
     assert!(success);
     let record: serde_json::Value = serde_json::from_str(stdout.lines().next().unwrap()).unwrap();
     assert!(record.get("lines").is_none(), "no line work without --lines");
+}
+
+#[test]
+fn test_exec_limit_exact_under_concurrency() {
+    let dir = TempTestDir::new("limit_exec_race");
+    for i in 0..200 {
+        dir.create_file(&format!("f{:03}.txt", i), b"x");
+    }
+
+    let (stdout, _, success) = run_ffind(
+        &["txt", "--limit", "3", "-j", "8", "-X", "echo", "ran"],
+        &dir.path,
+    );
+    assert!(success);
+    let count = stdout.lines().filter(|l| !l.is_empty()).count();
+    assert_eq!(
+        count, 3,
+        "limit must be exact regardless of worker thread count, got: {stdout}"
+    );
 }

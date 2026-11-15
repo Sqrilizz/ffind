@@ -36,7 +36,6 @@ struct JsonRecord<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     score: Option<i32>,
 }
-
 pub fn write_record<W: Write>(
     writer: &mut W,
     record: &MatchRecord,
@@ -56,11 +55,7 @@ pub fn write_record<W: Write>(
             path: &record.path,
             raw_type,
             size: record.size,
-            lines: if record.lines != 0 {
-                Some(record.lines)
-            } else {
-                None
-            },
+            lines: record.lines,
             mtime: record.mtime_sec,
             mode: record.mode,
             is_exec: record.is_exec,
@@ -127,7 +122,7 @@ impl Summary {
             RawType::File => {
                 self.files += 1;
                 self.total_file_size += record.size;
-                self.total_lines += record.lines;
+                self.total_lines += record.lines.unwrap_or(0);
                 match &self.largest_file {
                     Some((_, max_size)) if record.size <= *max_size => {}
                     _ => {
@@ -275,7 +270,7 @@ mod tests {
             path: PathBuf::from("dir1"),
             raw_type: RawType::Directory,
             size: 4096,
-            lines: 0,
+            lines: None,
             mtime_sec: 0,
             mode: 0o755,
             is_exec: false,
@@ -285,7 +280,7 @@ mod tests {
             path: PathBuf::from("file1.txt"),
             raw_type: RawType::File,
             size: 1000,
-            lines: 10,
+            lines: Some(10),
             mtime_sec: 0,
             mode: 0o644,
             is_exec: false,
@@ -295,7 +290,7 @@ mod tests {
             path: PathBuf::from("file2.txt"),
             raw_type: RawType::File,
             size: 5000,
-            lines: 50,
+            lines: Some(50),
             mtime_sec: 0,
             mode: 0o644,
             is_exec: false,
@@ -319,7 +314,7 @@ mod tests {
             path: PathBuf::from("src/main.rs"),
             raw_type: RawType::File,
             size: 1234,
-            lines: 42,
+            lines: Some(42),
             mtime_sec: 1700000000,
             mode: 0o100644,
             is_exec: false,

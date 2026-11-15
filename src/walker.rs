@@ -26,7 +26,7 @@ pub struct MatchRecord {
     pub path: PathBuf,
     pub raw_type: RawType,
     pub size: u64,
-    pub lines: u64,
+    pub lines: Option<u64>,
     pub mtime_sec: i64,
     pub mode: u32,
     pub is_exec: bool,
@@ -70,10 +70,11 @@ fn acquire_match_slot(
 ) -> bool {
     match limit {
         Some(max) => {
-            if counter.load(Ordering::Relaxed) < max {
-                counter.fetch_add(1, Ordering::Relaxed);
+            let prev = counter.fetch_add(1, Ordering::Relaxed);
+            if prev < max {
                 true
             } else {
+                counter.fetch_sub(1, Ordering::Relaxed);
                 stop_flag.store(true, Ordering::Relaxed);
                 false
             }
@@ -100,7 +101,7 @@ struct EntryFilters {
 struct EntryStats {
     score: i32,
     size: u64,
-    lines: u64,
+    lines: Option<u64>,
     mtime_sec: i64,
     mode: u32,
     is_exec: bool,
@@ -127,6 +128,7 @@ impl EntryEvaluator {
         };
 
         let mut lines = 0u64;
+        let mut first_chunk = true;
         loop {
             let Ok(n) = file.read(&mut self.read_buf) else {
                 return 0;
@@ -135,8 +137,11 @@ impl EntryEvaluator {
                 return lines;
             }
             let chunk = &self.read_buf[..n];
-            if memchr::memchr(0, chunk).is_some() {
-                return 0;
+            if first_chunk {
+                first_chunk = false;
+                if memchr::memchr(0, chunk).is_some() {
+                    return 0;
+                }
             }
             lines += memchr::memchr_iter(b'\n', chunk).count() as u64;
         }
@@ -218,13 +223,13 @@ impl EntryEvaluator {
             }
         }
 
-        let mut lines = 0u64;
+        let mut lines = None;
         if matches_all && self.filters.needs_lines {
-            lines = if raw_type == RawType::File {
+            lines = Some(if raw_type == RawType::File {
                 self.count_lines(path)
             } else {
                 0
-            };
+            });
         }
 
         if matches_all {
