@@ -12,7 +12,7 @@ makedepends=(rust)
 provides=(ffind)
 conflicts=(ffind ffind-rs-bin)
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=("SKIP")
+sha256sums=("fbf51285d777f6193db24da51cdf68e3dad9e812c4177f76cd8630294ac8ea20")
 options=(!lto)
 
 prepare() {

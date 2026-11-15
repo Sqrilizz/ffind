@@ -36,6 +36,7 @@ jobs:
             "ffind-${GITHUB_REF_NAME}-x86_64-linux${{ matrix.suffix }}/ffind"
           tar -czf "ffind-${GITHUB_REF_NAME}-x86_64-linux${{ matrix.suffix }}.tar.gz" \
             "ffind-${GITHUB_REF_NAME}-x86_64-linux${{ matrix.suffix }}"
+          rm -rf "ffind-${GITHUB_REF_NAME}-x86_64-linux${{ matrix.suffix }}"
           sha256sum "ffind-${GITHUB_REF_NAME}-x86_64-linux${{ matrix.suffix }}.tar.gz" \
             > "ffind-${GITHUB_REF_NAME}-x86_64-linux${{ matrix.suffix }}.tar.gz.sha256"
 
