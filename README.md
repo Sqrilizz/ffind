@@ -48,6 +48,13 @@ hyperfine --warmup 3 'ffind -e h /usr/include' 'fd -e h "" /usr/include' 'find /
 
 ## Installation
 
+### Install from crates.io
+
+```bash
+cargo install ffind-rs
+```
+The binary is installed as `ffind`.
+
 ### Prerequisites
 
 - Linux kernel >= 4.11 (with `statx` support)
