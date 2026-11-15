@@ -1,8 +1,14 @@
 [package]
 name = "ffind"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.85"
+description = "High-performance, multi-threaded file finder for Linux with gitignore support, fuzzy matching, and JSON streaming"
+license = "MIT"
+repository = "https://github.com/Sqrilizz/ffind"
+readme = "README.md"
+keywords = ["find", "search", "files", "cli", "walker"]
+categories = ["command-line-utilities", "filesystem"]
 
 [dependencies]
 anyhow = "1.0.95"

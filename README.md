@@ -124,8 +124,8 @@ ffind -L target.txt
 | `--changed <DURATION>` | Filter by modification time (`-24h`, `-7d`, `+30m`, `-1M`) | `ffind --changed -2h` |
 | `--empty` | Match empty files (size 0) and empty directories | `ffind --empty` |
 | `-E, --exclude <PATTERN>` | Exclude entries matching substring/name | `ffind -E tests` |
-| `--min-depth <NUM>` | Minimum directory recursion depth | `ffind --min-depth 2` |
-| `-m, --max-depth <NUM>` | Maximum directory recursion depth | `ffind -m 2` |
+| `--min-depth <NUM>` | Minimum depth of matched entries (start point is depth 0) | `ffind --min-depth 2` |
+| `-m, --max-depth <NUM>` | Maximum depth of matched entries (start point is depth 0, like `find -maxdepth`) | `ffind -m 2` |
 | `-H, --hidden` | Include hidden files and directories | `ffind -H` |
 | `--no-ignore` | Do not skip ignored directories or `.gitignore` entries | `ffind --no-ignore` |
 | `--one-file-system` | Do not cross filesystem boundaries (`xdev`) | `ffind --one-file-system /` |
@@ -145,8 +145,8 @@ ffind -L target.txt
 | `-0, --print0` | Delimit results with a null byte (for `xargs -0`) |
 | `--color <auto\|always\|never>` | Control colored output (respects `LS_COLORS`) |
 | `--time` | Measure execution time and matched count (outputs to `stderr`) |
-| `-X, --exec <CMD>...` | Execute command for each match individually (`{}` replaced with path) |
-| `--exec-batch <CMD>...` | Execute command once with all matching paths as arguments |
+| `-X, --exec <CMD>...` | Execute command for each match individually (placeholders: `{}` full path, `{/}` file name, `{//}` parent dir, `{/.}` file stem) |
+| `--exec-batch <CMD>...` | Execute command once with all matching paths as arguments (append paths if no placeholder given) |
 | `--generate-completions <SHELL>` | Output completion script (`bash`, `zsh`, `fish`, etc.) |
 
 ## Examples
@@ -205,8 +205,11 @@ ffind --summary rs | wc -l
 # Run rustfmt on all Rust files at once (single process invocation)
 ffind -e rs --exec-batch rustfmt
 
-# Individual process execution with placeholder
+# Individual process execution with placeholders
 ffind -g "*.bak" -X rm -v {}
+
+# Rename all .jpeg files using the stem placeholder
+ffind -e jpeg -X bash -c 'mv {/.}.jpeg {/.}.jpg'
 
 # Null-terminated pipeline with xargs
 ffind -0 -t f -g "*.log" | xargs -0 gzip
