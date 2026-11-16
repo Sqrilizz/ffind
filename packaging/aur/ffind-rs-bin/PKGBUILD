@@ -1,7 +1,7 @@
 # Maintainer: Sqrilizz <https://github.com/Sqrilizz>
 
 pkgname=ffind-rs-bin
-pkgver=0.2.0
+pkgver=0.2.1
 pkgrel=1
 pkgdesc="High-performance, multi-threaded file finder for Linux with gitignore support and fuzzy matching (prebuilt binary)"
 arch=(x86_64)
@@ -10,7 +10,7 @@ license=(MIT)
 provides=(ffind)
 conflicts=(ffind ffind-rs)
 source=("$pkgname-$pkgver.tar.gz::$url/releases/download/v$pkgver/ffind-v$pkgver-x86_64-linux-musl.tar.gz")
-sha256sums=("02284584185c44d920e505609953a32fb31d426325a23460f1f7ded39dc9b31d")
+sha256sums=("0e45cc2a6d7bb62eb16a15e64ffb45b010bf439ccaa65128a8dcac3740e86566")
 
 package() {
   cd "$srcdir/ffind-v$pkgver-x86_64-linux-musl"
