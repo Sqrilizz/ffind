@@ -12,10 +12,11 @@ mod statx;
 mod tree;
 mod walker;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use clap::{CommandFactory, Parser};
 use crossbeam_channel::bounded;
 use std::cmp::Reverse;
+use std::ffi::CString;
 use std::io::{self, BufWriter};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
@@ -33,6 +34,33 @@ use crate::statx::{SizeFilter, TimeFilter, parse_size_bytes};
 
 const DEFAULT_HASH_MAX_SIZE_BYTES: u64 = 1024 * 1024 * 1024;
 use crate::walker::{MatchRecord, WalkContext};
+
+fn resolve_owner(specs: &[String]) -> Result<Option<Arc<Vec<u32>>>> {
+    if specs.is_empty() {
+        return Ok(None);
+    }
+
+    let mut uids = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let part = spec.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Ok(uid) = part.parse::<u32>() {
+            uids.push(uid);
+            continue;
+        }
+        let c_name = CString::new(part).context("username contains null byte")?;
+        let passwd = unsafe { libc::getpwnam(c_name.as_ptr()) };
+        if passwd.is_null() {
+            bail!("unknown user: '{part}'");
+        }
+        // # Safety: passwd points to static thread-local storage that stays valid until the next getpw* call; uid is copied immediately.
+        uids.push(unsafe { (*passwd).pw_uid });
+    }
+
+    Ok(Some(Arc::new(uids)))
+}
 
 fn main() -> Result<()> {
     let start_time = Instant::now();
@@ -102,8 +130,13 @@ fn main() -> Result<()> {
         None
     };
 
-    let needs_stat =
-        cli.long || cli.sort.is_some() || cli.summary || cli.empty || cli.json || cli.hash;
+    let needs_stat = cli.long
+        || cli.sort.is_some()
+        || cli.summary
+        || cli.empty
+        || cli.json
+        || cli.hash
+        || !cli.owner.is_empty();
     let needs_lines = cli.lines || cli.sort == Some(SortBy::Lines);
 
     let ctx = WalkContext {
@@ -111,6 +144,7 @@ fn main() -> Result<()> {
         content_matcher,
         size_filter,
         time_filter,
+        owners: resolve_owner(&cli.owner)?,
         exclude,
         root_dev,
         executor,
@@ -265,4 +299,49 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn specs(input: &str) -> Vec<String> {
+        input.split(',').map(String::from).collect()
+    }
+
+    #[test]
+    fn test_resolve_owner_empty() {
+        assert!(resolve_owner(&[]).unwrap().is_none());
+        assert!(resolve_owner(&specs(",")).unwrap().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_resolve_owner_numeric() {
+        let uids = resolve_owner(&specs("1000,0")).unwrap().unwrap();
+        assert_eq!(*uids, vec![1000, 0]);
+    }
+
+    #[test]
+    fn test_resolve_owner_numeric_with_spaces() {
+        let uids = resolve_owner(&specs(" 1000 , 0 ")).unwrap().unwrap();
+        assert_eq!(*uids, vec![1000, 0]);
+    }
+
+    #[test]
+    fn test_resolve_owner_name_root() {
+        let uids = resolve_owner(&specs("root")).unwrap().unwrap();
+        assert_eq!(*uids, vec![0]);
+    }
+
+    #[test]
+    fn test_resolve_owner_mixed() {
+        let uids = resolve_owner(&specs("root,1000")).unwrap().unwrap();
+        assert_eq!(*uids, vec![0, 1000]);
+    }
+
+    #[test]
+    fn test_resolve_owner_unknown_name() {
+        let err = resolve_owner(&specs("no_such_user_ffind")).unwrap_err();
+        assert!(err.to_string().contains("unknown user"));
+    }
 }

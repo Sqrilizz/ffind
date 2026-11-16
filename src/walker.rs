@@ -31,6 +31,7 @@ pub struct MatchRecord {
     pub mtime_sec: i64,
     pub mode: u32,
     pub is_exec: bool,
+    pub uid: Option<u32>,
     pub score: i32,
 }
 
@@ -39,6 +40,7 @@ pub struct WalkContext {
     pub content_matcher: Option<Arc<ContentMatcher>>,
     pub size_filter: Option<SizeFilter>,
     pub time_filter: Option<TimeFilter>,
+    pub owners: Option<Arc<Vec<u32>>>,
     pub exclude: Arc<Vec<String>>,
     pub root_dev: Option<u64>,
     pub executor: Option<Arc<CommandExecutor>>,
@@ -89,6 +91,7 @@ struct EntryFilters {
     content_matcher: Option<Arc<ContentMatcher>>,
     size_filter: Option<SizeFilter>,
     time_filter: Option<TimeFilter>,
+    owners: Option<Arc<Vec<u32>>>,
     needs_stat: bool,
     needs_lines: bool,
     hash_max_size: Option<u64>,
@@ -104,6 +107,7 @@ struct EntryStats {
     mtime_sec: i64,
     mode: u32,
     is_exec: bool,
+    uid: Option<u32>,
 }
 
 struct EntryEvaluator {
@@ -195,29 +199,45 @@ impl EntryEvaluator {
         let mut mtime_sec = 0i64;
         let mut mode = initial_mode;
         let mut is_exec = (mode & 0o111) != 0;
+        let mut uid = None;
 
         if self.filters.needs_stat
             || self.filters.size_filter.is_some()
             || self.filters.time_filter.is_some()
+            || self.filters.owners.is_some()
         {
-            if let Ok(file_meta) = query_statx(path, self.filters.follow) {
-                size = file_meta.size;
-                mtime_sec = file_meta.mtime_sec;
-                mode = file_meta.mode;
-                is_exec = file_meta.is_executable;
+            match query_statx(path, self.filters.follow) {
+                Ok(file_meta) => {
+                    size = file_meta.size;
+                    mtime_sec = file_meta.mtime_sec;
+                    mode = file_meta.mode;
+                    is_exec = file_meta.is_executable;
+                    uid = Some(file_meta.uid);
 
-                if let Some(sf) = self.filters.size_filter {
-                    if !sf.matches(size) {
+                    if let Some(sf) = self.filters.size_filter {
+                        if !sf.matches(size) {
+                            matches_all = false;
+                        }
+                    }
+                    if let Some(tf) = self.filters.time_filter {
+                        if !tf.matches(mtime_sec) {
+                            matches_all = false;
+                        }
+                    }
+                    if let Some(owners) = &self.filters.owners {
+                        if !owners.contains(&file_meta.uid) {
+                            matches_all = false;
+                        }
+                    }
+                }
+                Err(_) => {
+                    if self.filters.size_filter.is_some()
+                        || self.filters.time_filter.is_some()
+                        || self.filters.owners.is_some()
+                    {
                         matches_all = false;
                     }
                 }
-                if let Some(tf) = self.filters.time_filter {
-                    if !tf.matches(mtime_sec) {
-                        matches_all = false;
-                    }
-                }
-            } else if self.filters.size_filter.is_some() || self.filters.time_filter.is_some() {
-                matches_all = false;
             }
         }
 
@@ -251,6 +271,7 @@ impl EntryEvaluator {
                 mtime_sec,
                 mode,
                 is_exec,
+                uid,
             })
         } else {
             None
@@ -306,6 +327,7 @@ impl MatchSink<'_> {
             mtime_sec: stats.mtime_sec,
             mode: stats.mode,
             is_exec: stats.is_exec,
+            uid: stats.uid,
             score: stats.score,
         };
         if self.sender.send(record).is_err() {
@@ -400,6 +422,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
         content_matcher: ctx.content_matcher.clone(),
         size_filter: ctx.size_filter,
         time_filter: ctx.time_filter,
+        owners: ctx.owners.clone(),
         needs_stat: ctx.needs_stat,
         needs_lines: ctx.needs_lines,
         hash_max_size: ctx.hash_max_size,

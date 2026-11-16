@@ -19,7 +19,7 @@ Designed as a fast, modern alternative to `find` with work-stealing concurrency,
 - **Zero-Allocation Fuzzy Engine:** $O(N)$ greedy subsequence matching with word boundary bonuses and consecutive match weighting (`-z`, `--fuzzy`), sorted by relevance score by default. Hot-path matching uses stack buffers without heap allocations.
 - **Fast Extension Filtering:** Match single or multiple file extensions (`-e, --extension rs,toml`) in $O(1)$ without heap allocations.
 - **Flexible Pattern Matching:** Substring, exact match (`-x`), globs (`-g`), regular expressions (`-r`), and file content inspection (`-C`).
-- **Metadata Filters:** Filter by file size (`--size`), modification age (`--changed`), empty files/directories (`--empty`), entry type (`-t`), and depth bounds (`--min-depth`, `--max-depth`).
+- **Metadata Filters:** Filter by file size (`--size`), modification age (`--changed`), owner (`--owner`), empty files/directories (`--empty`), entry type (`-t`), and depth bounds (`--min-depth`, `--max-depth`).
 - **Pipeline-Safe Summary:** `--summary` aggregates counts, total size, largest file, and average size to `stderr`, keeping `stdout` clean for pipelines.
 - **Execution & Integration:** Single command execution (`-X`), batch command execution (`--exec-batch`), shell completions generator (`--generate-completions`), null-byte delimiter (`-0`), and multi-criteria sorting (`--sort <size|mtime|name|score>`).
 
@@ -155,6 +155,7 @@ ffind -L target.txt
 | `--changed <DURATION>` | Filter by modification time (`-24h`, `-7d`, `+30m`, `-1M`) | `ffind --changed -2h` |
 | `--newer-than <AGE\|DATE>` | Modified after an age (`2h`, `10m`, `3d`, plain seconds) or an absolute date (`2026-11-01`, `2026-11-01T15:30`) | `ffind --newer-than 1d` |
 | `--older-than <AGE\|DATE>` | Modified before an age or an absolute date (local time) | `ffind --older-than 2026-01-01` |
+| `--owner <USER>` | Owned by the given user(s): username or numeric UID, comma-separated (`--owner root,1000`). Resolved via the system user database | `ffind --owner $USER` |
 | `--hash` | Compute CRC32 of matched files, `--json` required (adds `crc32` and `size`; files above `--hash-max-size` are skipped) | `ffind --hash --json` |
 | `--hash-max-size <SIZE>` | Skip hashing for files larger than `SIZE` (`512M`, `2G`); default `1G` | `ffind --hash --hash-max-size 100M --json` |
 | `--empty` | Match empty files (size 0) and empty directories | `ffind --empty` |
@@ -208,6 +209,10 @@ ffind -a main.rs
 # JSON streaming output
 ffind --json -m 1 Cargo.toml
 # {"path":"./Cargo.toml","type":"file","size":506,"mtime":1794768968,"mode":33188,"is_exec":false}
+
+# Metadata filters (--size, --owner, ...) also include the file owner in JSON
+ffind --json --owner root -m 1 /etc/hostname
+# {"path":"/etc/hostname","type":"file","size":13,"mtime":1699999999,"mode":33188,"is_exec":false,"uid":0}
 ```
 
 ### Summary Statistics
@@ -319,7 +324,7 @@ ffind --min-depth 2 --sort mtime --limit 10
 ## Architecture
 
 1. **Kernel-Level Directory Traversal:** `ffind` bypasses the standard library's `fs::read_dir` to read raw directory entries using `libc::syscall(SYS_getdents64, ...)`. This avoids multiple allocations per directory entry.
-2. **Lazy Statx:** File attributes (size, mode, mtime) are queried through `statx(2)` with minimal mask flags, and only when `--long`, `--sort`, `--size`, `--changed`, `--empty`, `--json`, or `--summary` are active.
+2. **Lazy Statx:** File attributes (size, mode, mtime, uid) are queried through `statx(2)` with minimal mask flags, and only when `--long`, `--sort`, `--size`, `--changed`, `--owner`, `--empty`, `--json`, or `--summary` are active.
 3. **Lock-Free Work Stealing:** Traversal workers maintain individual deques (`crossbeam-deque`). Threads steal tasks when idle, ensuring uniform core saturation across unbalanced directory structures.
 4. **Hierarchical Ignore Stack:** When traversing subdirectories, nested `.gitignore` rules are evaluated in thread-safe, stack-propagated structures without locks.
 5. **Zero-Allocation Hot Path:** Subsequence fuzzy search and case-insensitive string matching operate strictly on stack buffers with SIMD acceleration (`memchr`), completely eliminating per-entry heap allocations in matcher loops.

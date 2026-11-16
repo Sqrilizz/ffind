@@ -1,6 +1,6 @@
 use std::fs::{self, File};
 use std::io::Write;
-use std::os::unix::fs::symlink;
+use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -659,4 +659,46 @@ fn test_tree_output() {
     assert!(stdout_md.contains("docs/"));
     assert!(stdout_md.contains("guide.md"));
     assert!(!stdout_md.contains("main.rs"));
+}
+
+#[test]
+fn test_owner_filter() {
+    let dir = TempTestDir::new("owner");
+    dir.create_file("mine.txt", b"x");
+    dir.create_file("sub/nested.txt", b"y");
+
+    let uid = fs::metadata(dir.path.join("mine.txt")).unwrap().uid();
+
+    let (stdout, _, success) = run_ffind(&["--owner", &uid.to_string()], &dir.path);
+    assert!(success);
+    assert!(
+        stdout.contains("mine.txt"),
+        "uid {uid} must match own files: {stdout}"
+    );
+    assert!(stdout.contains("nested.txt"));
+
+    let (stdout, _, success) = run_ffind(&["--owner", "99999"], &dir.path);
+    assert!(success);
+    assert!(stdout.is_empty(), "nobody owns files here: {stdout}");
+
+    let (stdout, _, success) = run_ffind(&["--owner", "0,99999"], &dir.path);
+    assert!(success);
+    assert!(
+        stdout.is_empty(),
+        "uid list without the owner must not match: {stdout}"
+    );
+
+    let (stdout, _, success) = run_ffind(&["--json", "--owner", &uid.to_string()], &dir.path);
+    assert!(success);
+    assert!(
+        stdout.contains(&format!("\"uid\":{uid}")),
+        "json must carry uid: {stdout}"
+    );
+
+    let (_, stderr, success) = run_ffind(&["--owner", "no_such_user_ffind"], &dir.path);
+    assert!(!success);
+    assert!(
+        stderr.contains("unknown user"),
+        "bad name must fail loudly: {stderr}"
+    );
 }

@@ -69,6 +69,9 @@ pub struct Cli {
     #[arg(long = "hash", requires = "json")]
     pub hash: bool,
 
+    #[arg(long = "owner", value_name = "USER", value_delimiter = ',')]
+    pub owner: Vec<String>,
+
     #[arg(long = "hash-max-size", value_name = "SIZE", requires = "hash")]
     pub hash_max_size: Option<String>,
 

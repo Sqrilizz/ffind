@@ -242,13 +242,14 @@ pub struct FileMeta {
     pub mtime_sec: i64,
     pub mode: u32,
     pub is_executable: bool,
+    pub uid: u32,
 }
 
 pub fn query_statx(path: &Path, follow_symlinks: bool) -> Result<FileMeta> {
     let path_bytes = path.as_os_str().as_bytes();
     let c_path = CString::new(path_bytes).context("path contains null byte")?;
 
-    let mask = libc::STATX_MODE | libc::STATX_SIZE | libc::STATX_MTIME;
+    let mask = libc::STATX_MODE | libc::STATX_SIZE | libc::STATX_MTIME | libc::STATX_UID;
 
     let flags = if follow_symlinks {
         0
@@ -281,6 +282,7 @@ pub fn query_statx(path: &Path, follow_symlinks: bool) -> Result<FileMeta> {
         mtime_sec: statx_buf.stx_mtime.tv_sec,
         mode,
         is_executable,
+        uid: statx_buf.stx_uid,
     })
 }
 

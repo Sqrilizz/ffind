@@ -34,6 +34,8 @@ struct JsonRecord<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     lines: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    uid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     crc32: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     score: Option<i32>,
@@ -58,6 +60,7 @@ pub fn write_record<W: Write>(
             raw_type,
             size: record.size,
             lines: record.lines,
+            uid: record.uid,
             crc32: record.crc32.map(|h| format!("{h:08x}")),
             mtime: record.mtime_sec,
             mode: record.mode,
@@ -274,6 +277,7 @@ mod tests {
             mtime_sec: 0,
             mode: 0o755,
             is_exec: false,
+            uid: None,
             score: 0,
         });
         summary.update(&MatchRecord {
@@ -285,6 +289,7 @@ mod tests {
             mtime_sec: 0,
             mode: 0o644,
             is_exec: false,
+            uid: None,
             score: 0,
         });
         summary.update(&MatchRecord {
@@ -296,6 +301,7 @@ mod tests {
             mtime_sec: 0,
             mode: 0o644,
             is_exec: false,
+            uid: None,
             score: 0,
         });
 
@@ -321,6 +327,7 @@ mod tests {
             mtime_sec: 1700000000,
             mode: 0o100644,
             is_exec: false,
+            uid: Some(1000),
             score: 0,
         };
         let colorizer = Colorizer::new(crate::color::ColorMode::Never);
@@ -331,5 +338,6 @@ mod tests {
         assert!(line.contains("\"type\":\"file\""));
         assert!(line.contains("\"size\":1234"));
         assert!(line.contains("\"crc32\":\"deadbeef\""));
+        assert!(line.contains("\"uid\":1000"));
     }
 }
