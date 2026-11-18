@@ -1,6 +1,6 @@
 use crossbeam_channel::Receiver;
 use std::io::{self, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
@@ -24,7 +24,7 @@ pub struct PrintConfig {
 
 #[derive(serde::Serialize)]
 struct JsonRecord<'a> {
-    path: &'a Path,
+    path: std::borrow::Cow<'a, str>,
     #[serde(rename = "type")]
     raw_type: &'static str,
     size: u64,
@@ -56,7 +56,7 @@ pub fn write_record<W: Write>(
             RawType::Other => "other",
         };
         let json_record = JsonRecord {
-            path: &record.path,
+            path: record.path.to_string_lossy(),
             raw_type,
             size: record.size,
             lines: record.lines,
@@ -225,11 +225,11 @@ impl PrinterHandle {
 
                 count += 1;
 
-                if let Some(max) = config.limit {
-                    if count >= max {
-                        stop_flag.store(true, Ordering::Relaxed);
-                        break;
-                    }
+                if let Some(max) = config.limit
+                    && count >= max
+                {
+                    stop_flag.store(true, Ordering::Relaxed);
+                    break;
                 }
             }
 

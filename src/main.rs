@@ -17,11 +17,11 @@ use clap::{CommandFactory, Parser};
 use crossbeam_channel::bounded;
 use std::cmp::Reverse;
 use std::ffi::CString;
-use std::io::{self, BufWriter};
+use std::io::{self, BufWriter, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -31,9 +31,10 @@ use crate::exec::CommandExecutor;
 use crate::matcher::{ContentMatcher, Matcher};
 use crate::printer::{PrintConfig, PrinterHandle, Summary, write_record};
 use crate::statx::{SizeFilter, TimeFilter, parse_size_bytes};
+use crate::walker::{MatchRecord, WalkContext};
 
 const DEFAULT_HASH_MAX_SIZE_BYTES: u64 = 1024 * 1024 * 1024;
-use crate::walker::{MatchRecord, WalkContext};
+const MAX_THREADS: usize = 1024;
 
 fn resolve_owner(specs: &[String]) -> Result<Option<Arc<Vec<u32>>>> {
     if specs.is_empty() {
@@ -55,7 +56,7 @@ fn resolve_owner(specs: &[String]) -> Result<Option<Arc<Vec<u32>>>> {
         if passwd.is_null() {
             bail!("unknown user: '{part}'");
         }
-        // # Safety: passwd points to static thread-local storage that stays valid until the next getpw* call; uid is copied immediately.
+        // # Safety: passwd points to static storage that stays valid until the next getpw* call; uid is copied immediately.
         uids.push(unsafe { (*passwd).pw_uid });
     }
 
@@ -66,6 +67,12 @@ fn main() -> Result<()> {
     let start_time = Instant::now();
     let mut cli = Cli::parse();
     cli.normalize();
+
+    if let Some(threads) = cli.threads
+        && (threads == 0 || threads > MAX_THREADS)
+    {
+        bail!("--threads must be between 1 and {MAX_THREADS}");
+    }
 
     if let Some(shell) = cli.generate_completions {
         clap_complete::generate(shell, &mut Cli::command(), "ffind", &mut io::stdout());
@@ -139,6 +146,22 @@ fn main() -> Result<()> {
         || !cli.owner.is_empty();
     let needs_lines = cli.lines || cli.sort == Some(SortBy::Lines);
 
+    let needs_collection = cli.sort.is_some() || cli.exec_batch.is_some() || cli.tree;
+
+    // Sorted, tree and batch modes collect first, so `-X` runs on the final
+    // ordering in the main thread. Streaming mode executes inline on workers.
+    let inline_executor = if needs_collection {
+        None
+    } else {
+        executor.clone()
+    };
+    let exec_failures = Arc::new(Mutex::new(None));
+    let exec_summary = if inline_executor.is_some() && cli.summary {
+        Some(Arc::new(Mutex::new(Summary::new(needs_lines))))
+    } else {
+        None
+    };
+
     let ctx = WalkContext {
         matcher,
         content_matcher,
@@ -147,7 +170,9 @@ fn main() -> Result<()> {
         owners: resolve_owner(&cli.owner)?,
         exclude,
         root_dev,
-        executor,
+        executor: inline_executor,
+        exec_failures: Arc::clone(&exec_failures),
+        exec_summary: exec_summary.clone(),
         needs_lines,
         hash_max_size,
         stop_flag: Arc::clone(&stop_flag),
@@ -157,8 +182,6 @@ fn main() -> Result<()> {
         min_depth: cli.min_depth,
         follow: cli.follow,
     };
-
-    let needs_collection = cli.sort.is_some() || cli.exec_batch.is_some() || cli.tree;
 
     let printer_handle = if !needs_collection {
         let print_config = PrintConfig {
@@ -259,6 +282,13 @@ fn main() -> Result<()> {
                 }
             }
             tree::print_tree(&records, &cli.path, &colorizer)?;
+        } else if let Some(executor) = &executor {
+            for record in &records {
+                if let Some(s) = &mut summary {
+                    s.update(record);
+                }
+                executor.execute(&record.path)?;
+            }
         } else {
             let stdout = io::stdout();
             let mut writer = BufWriter::with_capacity(131072, stdout.lock());
@@ -268,14 +298,24 @@ fn main() -> Result<()> {
                 if let Some(s) = &mut summary {
                     s.update(record);
                 }
-                let _ = write_record(
+                match write_record(
                     &mut writer,
                     record,
                     &colorizer,
                     cli.long,
                     cli.json,
                     delimiter,
-                );
+                ) {
+                    Ok(()) => {}
+                    Err(err) if err.kind() == io::ErrorKind::BrokenPipe => break,
+                    Err(err) => return Err(err.into()),
+                }
+            }
+
+            match writer.flush() {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {}
+                Err(err) => return Err(err.into()),
             }
         }
 
@@ -284,6 +324,19 @@ fn main() -> Result<()> {
         printer.join()?
     } else {
         None
+    };
+
+    let summary = match exec_summary {
+        Some(shared) => Some(match Arc::try_unwrap(shared) {
+            Ok(mutex) => mutex
+                .into_inner()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            Err(shared) => shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone(),
+        }),
+        None => summary,
     };
 
     walk_result?;

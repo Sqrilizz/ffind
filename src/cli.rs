@@ -161,7 +161,8 @@ pub struct Cli {
         long = "exec",
         num_args = 1..,
         value_name = "CMD",
-        allow_hyphen_values = true
+        allow_hyphen_values = true,
+        conflicts_with_all = ["json", "long", "print0", "lines"]
     )]
     pub exec: Option<Vec<String>>,
 
@@ -170,7 +171,7 @@ pub struct Cli {
         num_args = 1..,
         value_name = "CMD",
         allow_hyphen_values = true,
-        conflicts_with = "exec"
+        conflicts_with_all = ["exec", "json", "long", "print0", "lines"]
     )]
     pub exec_batch: Option<Vec<String>>,
 
@@ -180,18 +181,20 @@ pub struct Cli {
 
 impl Cli {
     pub fn normalize(&mut self) {
-        if self.path == Path::new(".") {
-            if let Some(p) = &self.pattern {
-                if p == "/" || p.contains('/') || Path::new(p).is_dir() {
-                    self.path = PathBuf::from(p);
-                    self.pattern = None;
-                }
-            }
+        // A bare word is always the pattern, even if a directory with that
+        // name exists. Paths are explicit: `.`, `..`, `/`, or anything with a
+        // separator. This keeps behavior stable across repositories.
+        if self.path == Path::new(".")
+            && let Some(p) = &self.pattern
+            && (p == "." || p == ".." || p == "/" || p.contains('/'))
+        {
+            self.path = PathBuf::from(p);
+            self.pattern = None;
         }
-        if self.absolute_path {
-            if let Ok(abs) = std::path::absolute(&self.path) {
-                self.path = abs;
-            }
+        if self.absolute_path
+            && let Ok(abs) = std::path::absolute(&self.path)
+        {
+            self.path = abs;
         }
         if self.fuzzy && self.sort.is_none() {
             self.sort = Some(SortBy::Score);

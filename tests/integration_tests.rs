@@ -1,8 +1,9 @@
 use std::fs::{self, File};
 use std::io::Write;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{MetadataExt, symlink};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 struct TempTestDir {
     path: PathBuf,
@@ -701,4 +702,143 @@ fn test_owner_filter() {
         stderr.contains("unknown user"),
         "bad name must fail loudly: {stderr}"
     );
+}
+
+#[test]
+fn test_exec_failure_is_reported() {
+    let dir = TempTestDir::new("exec_failure");
+    dir.create_file("a.txt", b"x");
+
+    let (_, stderr, success) = run_ffind(&["txt", "-X", "false"], &dir.path);
+    assert!(!success, "a failing -X command must exit non-zero");
+    assert!(
+        stderr.contains("command exited"),
+        "failure details must reach stderr: {stderr}"
+    );
+
+    let (_, stderr, success) = run_ffind(&["txt", "-X", "no-such-command-ffind"], &dir.path);
+    assert!(!success, "a missing command must exit non-zero");
+    assert!(
+        stderr.contains("failed to execute"),
+        "missing command must be reported: {stderr}"
+    );
+}
+
+#[test]
+fn test_summary_with_exec() {
+    let dir = TempTestDir::new("summary_exec");
+    dir.create_file("a.txt", b"1");
+    dir.create_file("b.txt", b"22");
+
+    let (stdout, stderr, success) = run_ffind(&["--summary", "txt", "-X", "true"], &dir.path);
+    assert!(success);
+    assert!(stdout.is_empty(), "exec mode must not print paths");
+    assert!(
+        stderr.contains("Total matches: 2"),
+        "summary must count executed matches: {stderr}"
+    );
+    assert!(stderr.contains("Files: 2"), "stderr: {stderr}");
+}
+
+#[test]
+fn test_json_handles_non_utf8_names() {
+    let dir = TempTestDir::new("non_utf8");
+    let bad_name = dir
+        .path
+        .join(std::ffi::OsString::from_vec(b"bad\xffname.txt".to_vec()));
+    let mut file = File::create(&bad_name).unwrap();
+    file.write_all(b"x").unwrap();
+
+    let (stdout, _, success) = run_ffind(&["--json", "txt"], &dir.path);
+    assert!(success, "non-UTF-8 names must not abort JSON output");
+    assert!(!stdout.is_empty());
+
+    for line in stdout.lines() {
+        let parsed: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|e| panic!("invalid JSON {line:?}: {e}"));
+        assert!(parsed["path"].as_str().unwrap().ends_with("name.txt"));
+    }
+}
+
+#[test]
+fn test_threads_zero_rejected() {
+    let dir = TempTestDir::new("threads_zero");
+    dir.create_file("a.txt", b"x");
+
+    let (_, stderr, success) = run_ffind(&["txt", "-j", "0"], &dir.path);
+    assert!(!success, "zero worker threads must be rejected");
+    assert!(stderr.contains("--threads"), "stderr: {stderr}");
+}
+
+#[test]
+fn test_max_depth_zero_prints_start_point() {
+    let dir = TempTestDir::new("maxdepth_zero");
+    dir.create_file("top.txt", b"x");
+
+    let (stdout, _, success) = run_ffind(&["-m", "0"], &dir.path);
+    assert!(success);
+    assert_eq!(stdout.trim(), ".", "got: {stdout:?}");
+
+    let (stdout, _, success) = run_ffind(&["top", "-m", "0"], &dir.path);
+    assert!(success);
+    assert!(
+        stdout.is_empty(),
+        "the start point must still respect the pattern: {stdout:?}"
+    );
+}
+
+#[test]
+fn test_write_errors_are_reported_in_collector_mode() {
+    let full = Path::new("/dev/full");
+    if !full.exists() {
+        return;
+    }
+
+    let dir = TempTestDir::new("write_error");
+    dir.create_file("a.txt", b"x");
+
+    let bin = env!("CARGO_BIN_EXE_ffind");
+    let output = Command::new(bin)
+        .args(["--sort", "name", "txt"])
+        .current_dir(&dir.path)
+        .stdout(File::create(full).unwrap())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("failed to execute ffind binary");
+
+    assert!(
+        !output.status.success(),
+        "write errors in collector mode must exit non-zero"
+    );
+}
+
+#[test]
+fn test_plain_directory_name_is_a_pattern() {
+    let dir = TempTestDir::new("plain_dir_pattern");
+    dir.create_dir("docs");
+    dir.create_file("docs/guide.md", b"c");
+
+    let (stdout, _, success) = run_ffind(&["docs"], &dir.path);
+    assert!(success);
+    assert_eq!(
+        stdout.trim(),
+        "./docs",
+        "a bare word must stay a pattern even when a directory has that name"
+    );
+
+    let (stdout, _, success) = run_ffind(&["./docs"], &dir.path);
+    assert!(success);
+    assert!(
+        stdout.contains("guide.md"),
+        "an explicit path must be searched as a directory: {stdout}"
+    );
+}
+
+#[test]
+fn test_json_and_exec_conflict() {
+    let dir = TempTestDir::new("json_exec_conflict");
+    dir.create_file("a.txt", b"x");
+
+    let (_, _, success) = run_ffind(&["--json", "txt", "-X", "echo"], &dir.path);
+    assert!(!success, "--json with -X must be rejected");
 }

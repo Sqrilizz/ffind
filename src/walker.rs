@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -6,17 +5,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
 use crossbeam_deque::{Injector, Stealer, Worker};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use std::io::Read;
+use std::sync::Mutex;
 
 use crate::cli::Cli;
 use crate::dirent::DirectoryReader;
 use crate::exec::CommandExecutor;
 use crate::matcher::{ContentMatcher, Matcher, RawType};
+use crate::printer::Summary;
 use crate::statx::{SizeFilter, TimeFilter, query_statx};
 
 const READ_BUF_SIZE: usize = 65536;
@@ -44,6 +46,8 @@ pub struct WalkContext {
     pub exclude: Arc<Vec<String>>,
     pub root_dev: Option<u64>,
     pub executor: Option<Arc<CommandExecutor>>,
+    pub exec_failures: Arc<Mutex<Option<anyhow::Error>>>,
+    pub exec_summary: Option<Arc<Mutex<Summary>>>,
     pub needs_lines: bool,
     pub hash_max_size: Option<u64>,
     pub stop_flag: Arc<AtomicBool>,
@@ -54,11 +58,33 @@ pub struct WalkContext {
     pub follow: bool,
 }
 
+/// One node of a directory ancestry chain used for cycle detection when
+/// following symlinks. Sharing nodes with `Arc` makes extending the chain
+/// O(1) instead of cloning the whole ancestor set for every directory.
+struct AncestorNode {
+    dev: u64,
+    ino: u64,
+    parent: Option<Arc<AncestorNode>>,
+}
+
+impl AncestorNode {
+    fn contains(&self, dev: u64, ino: u64) -> bool {
+        let mut current = Some(self);
+        while let Some(node) = current {
+            if node.dev == dev && node.ino == ino {
+                return true;
+            }
+            current = node.parent.as_deref();
+        }
+        false
+    }
+}
+
 struct DirTask {
     path: PathBuf,
     depth: usize,
     gitignores: Arc<Vec<Gitignore>>,
-    ancestors: Option<Arc<HashSet<(u64, u64)>>>,
+    ancestors: Option<Arc<AncestorNode>>,
 }
 
 /// Registers a match and returns whether it may be emitted.
@@ -179,10 +205,10 @@ impl EntryEvaluator {
 
         let mut matches_all = true;
 
-        if let Some(min) = self.filters.min_depth {
-            if depth < min {
-                matches_all = false;
-            }
+        if let Some(min) = self.filters.min_depth
+            && depth < min
+        {
+            matches_all = false;
         }
 
         if let Some(cm) = &self.filters.content_matcher {
@@ -214,20 +240,20 @@ impl EntryEvaluator {
                     is_exec = file_meta.is_executable;
                     uid = Some(file_meta.uid);
 
-                    if let Some(sf) = self.filters.size_filter {
-                        if !sf.matches(size) {
-                            matches_all = false;
-                        }
+                    if let Some(sf) = self.filters.size_filter
+                        && !sf.matches(size)
+                    {
+                        matches_all = false;
                     }
-                    if let Some(tf) = self.filters.time_filter {
-                        if !tf.matches(mtime_sec) {
-                            matches_all = false;
-                        }
+                    if let Some(tf) = self.filters.time_filter
+                        && !tf.matches(mtime_sec)
+                    {
+                        matches_all = false;
                     }
-                    if let Some(owners) = &self.filters.owners {
-                        if !owners.contains(&file_meta.uid) {
-                            matches_all = false;
-                        }
+                    if let Some(owners) = &self.filters.owners
+                        && !owners.contains(&file_meta.uid)
+                    {
+                        matches_all = false;
                     }
                 }
                 Err(_) => {
@@ -290,10 +316,10 @@ impl EntryEvaluator {
             stats.lines = Some(self.count_lines(path));
         }
 
-        if let Some(max_size) = self.filters.hash_max_size {
-            if stats.size <= max_size {
-                stats.crc32 = self.hash_file(path);
-            }
+        if let Some(max_size) = self.filters.hash_max_size
+            && stats.size <= max_size
+        {
+            stats.crc32 = self.hash_file(path);
         }
     }
 }
@@ -303,6 +329,8 @@ struct MatchSink<'a> {
     stop_flag: &'a AtomicBool,
     limit: Option<usize>,
     executor: Option<&'a CommandExecutor>,
+    failures: &'a Mutex<Option<anyhow::Error>>,
+    summary: Option<&'a Mutex<Summary>>,
     sender: &'a Sender<MatchRecord>,
 }
 
@@ -313,11 +341,6 @@ impl MatchSink<'_> {
     }
 
     fn emit(&self, path: &Path, raw_type: RawType, stats: EntryStats) {
-        if let Some(exec) = self.executor {
-            let _ = exec.execute(path);
-            return;
-        }
-
         let record = MatchRecord {
             path: path.to_path_buf(),
             raw_type,
@@ -330,6 +353,33 @@ impl MatchSink<'_> {
             uid: stats.uid,
             score: stats.score,
         };
+
+        if let Some(exec) = self.executor {
+            match exec.execute(path) {
+                Ok(()) => {
+                    if let Some(summary) = self.summary {
+                        summary
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner())
+                            .update(&record);
+                    }
+                }
+                Err(err) => {
+                    let mut slot = self
+                        .failures
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    if slot.is_none() {
+                        *slot = Some(err.context(format!(
+                            "while executing a command for '{}'",
+                            path.display()
+                        )));
+                    }
+                }
+            }
+            return;
+        }
+
         if self.sender.send(record).is_err() {
             self.stop_flag.store(true, Ordering::Relaxed);
         }
@@ -431,29 +481,35 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
     };
 
     let mut root_evaluator = EntryEvaluator::new(filters.clone());
+    let exec_failures = Arc::clone(&ctx.exec_failures);
+    let exec_summary = ctx.exec_summary.clone();
     let root_sink = MatchSink {
         counter: &ctx.match_counter,
         stop_flag: &ctx.stop_flag,
         limit: walker_limit,
         executor: ctx.executor.as_deref(),
+        failures: &exec_failures,
+        summary: exec_summary.as_deref(),
         sender: &sender,
     };
 
-    if let Some(name) = root_path.file_name() {
-        let match_score = ctx.matcher.matches(name.as_bytes(), raw_type);
+    // `.`, `..` and `/` have no file name, but they are still valid start
+    // points and must behave like `find` with `-maxdepth 0`.
+    let root_name = root_path
+        .file_name()
+        .unwrap_or_else(|| root_path.as_os_str());
+    let match_score = ctx.matcher.matches(root_name.as_bytes(), raw_type);
 
-        if let Some(mut stats) = root_evaluator.evaluate(
-            match_score,
-            raw_type,
-            &root_path,
-            0,
-            meta.permissions().mode(),
-        ) {
-            if root_sink.acquire() {
-                root_evaluator.fill_heavy(&mut stats, raw_type, &root_path);
-                root_sink.emit(&root_path, raw_type, stats);
-            }
-        }
+    if let Some(mut stats) = root_evaluator.evaluate(
+        match_score,
+        raw_type,
+        &root_path,
+        0,
+        meta.permissions().mode(),
+    ) && root_sink.acquire()
+    {
+        root_evaluator.fill_heavy(&mut stats, raw_type, &root_path);
+        root_sink.emit(&root_path, raw_type, stats);
     }
 
     if !meta.is_dir() {
@@ -476,9 +532,11 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
     };
 
     let initial_ancestors = if ctx.follow {
-        let mut set = HashSet::new();
-        set.insert((meta.dev(), meta.ino()));
-        Some(Arc::new(set))
+        Some(Arc::new(AncestorNode {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            parent: None,
+        }))
     } else {
         None
     };
@@ -512,6 +570,8 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
         let stop_flag = Arc::clone(&ctx.stop_flag);
         let matcher = Arc::clone(&ctx.matcher);
         let executor = ctx.executor.as_ref().map(Arc::clone);
+        let failures = Arc::clone(&exec_failures);
+        let summary = exec_summary.clone();
         let exclude = Arc::clone(&ctx.exclude);
         let sender = sender.clone();
         let match_counter = Arc::clone(&ctx.match_counter);
@@ -537,9 +597,12 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                 stop_flag: &stop_flag,
                 limit: walker_limit,
                 executor: executor.as_deref(),
+                failures: &failures,
+                summary: summary.as_deref(),
                 sender: &sender,
             };
             let mut was_active = false;
+            let mut idle_spins = 0u32;
 
             loop {
                 if stop_flag.load(Ordering::Relaxed) {
@@ -547,6 +610,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                 }
 
                 if let Some(task) = find_task(&worker, &injector, &thread_stealers) {
+                    idle_spins = 0;
                     if !was_active {
                         active_threads.fetch_add(1, Ordering::SeqCst);
                         was_active = true;
@@ -559,10 +623,10 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                     let _ = reader.read_entries(&task_path, |entry| {
                         // Entries deeper than --max-depth are never matched
                         // (find -maxdepth semantics: the start point is depth 0).
-                        if let Some(max) = max_depth {
-                            if next_depth > max {
-                                return Ok(());
-                            }
+                        if let Some(max) = max_depth
+                            && next_depth > max
+                        {
+                            return Ok(());
                         }
 
                         if !hidden && entry.name.first() == Some(&b'.') {
@@ -598,8 +662,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                         }
 
                         if !exclude.is_empty() {
-                            let entry_name_str =
-                                std::str::from_utf8(entry.name).unwrap_or_default();
+                            let entry_name_str = String::from_utf8_lossy(entry.name);
                             for ex in exclude.iter() {
                                 if entry_name_str.contains(ex.as_str()) {
                                     return Ok(());
@@ -626,23 +689,18 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                             }
                         }
 
-                        if entry_matched {
-                            if let Some(mut stats) = evaluator.evaluate(
+                        if entry_matched
+                            && let Some(mut stats) = evaluator.evaluate(
                                 match_score,
                                 effective_raw_type,
                                 &child_path,
                                 next_depth,
                                 0,
-                            ) {
-                                if sink.acquire() {
-                                    evaluator.fill_heavy(
-                                        &mut stats,
-                                        effective_raw_type,
-                                        &child_path,
-                                    );
-                                    sink.emit(&child_path, effective_raw_type, stats);
-                                }
-                            }
+                            )
+                            && sink.acquire()
+                        {
+                            evaluator.fill_heavy(&mut stats, effective_raw_type, &child_path);
+                            sink.emit(&child_path, effective_raw_type, stats);
                         }
 
                         if is_directory {
@@ -656,14 +714,17 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
 
                                 let child_ancestors = if let Some(ancestors) = &task.ancestors {
                                     if let Ok(dir_meta) = std::fs::metadata(&child_path) {
-                                        let key = (dir_meta.dev(), dir_meta.ino());
-                                        if ancestors.contains(&key) {
+                                        let dev = dir_meta.dev();
+                                        let ino = dir_meta.ino();
+                                        if ancestors.contains(dev, ino) {
                                             should_descend = false;
                                             None
                                         } else {
-                                            let mut new_set = (**ancestors).clone();
-                                            new_set.insert(key);
-                                            Some(Arc::new(new_set))
+                                            Some(Arc::new(AncestorNode {
+                                                dev,
+                                                ino,
+                                                parent: Some(Arc::clone(ancestors)),
+                                            }))
                                         }
                                     } else {
                                         should_descend = false;
@@ -673,20 +734,17 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                                     None
                                 };
 
-                                if should_descend {
-                                    if let Some(expected_dev) = root_dev {
-                                        let child_meta_res = if follow {
-                                            std::fs::metadata(&child_path)
-                                        } else {
-                                            std::fs::symlink_metadata(&child_path)
-                                        };
-                                        if let Ok(child_meta) = child_meta_res {
-                                            if child_meta.dev() != expected_dev {
-                                                should_descend = false;
-                                            }
-                                        } else {
-                                            should_descend = false;
-                                        }
+                                if should_descend && let Some(expected_dev) = root_dev {
+                                    let child_meta_res = if follow {
+                                        std::fs::metadata(&child_path)
+                                    } else {
+                                        std::fs::symlink_metadata(&child_path)
+                                    };
+                                    let same_filesystem = child_meta_res
+                                        .map(|child_meta| child_meta.dev() == expected_dev)
+                                        .unwrap_or(false);
+                                    if !same_filesystem {
+                                        should_descend = false;
                                     }
                                 }
 
@@ -730,7 +788,15 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
                         }
                     }
 
-                    thread::yield_now();
+                    // Spin briefly for handoffs, then back off with short
+                    // sleeps so idle workers do not burn a core while another
+                    // thread is busy with a slow entry (`--hash`, `--lines`).
+                    if idle_spins < 8 {
+                        idle_spins += 1;
+                        thread::yield_now();
+                    } else {
+                        thread::sleep(Duration::from_micros(100));
+                    }
                 }
             }
         });
@@ -740,6 +806,14 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
 
     for handle in handles {
         let _ = handle.join();
+    }
+
+    if let Some(err) = exec_failures
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        return Err(err);
     }
 
     Ok(())
