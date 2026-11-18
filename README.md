@@ -58,8 +58,8 @@ hyperfine --warmup 3 'ffind -e h /usr/include' 'fd -e h "" /usr/include' 'find /
 Static and dynamically linked builds for x86_64 Linux are attached to every [GitHub Release](https://github.com/Sqrilizz/ffind/releases/latest):
 
 ```bash
-curl -LO https://github.com/Sqrilizz/ffind/releases/latest/download/ffind-v0.2.1-x86_64-linux-musl.tar.gz
-tar -xzf ffind-v0.2.1-x86_64-linux-musl.tar.gz
+curl -LO https://github.com/Sqrilizz/ffind/releases/latest/download/ffind-v0.3.0-x86_64-linux-musl.tar.gz
+tar -xzf ffind-v0.3.0-x86_64-linux-musl.tar.gz
 install -m 755 ffind-*-x86_64-linux-musl/ffind ~/.local/bin/
 ```
 

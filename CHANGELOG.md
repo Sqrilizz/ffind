@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions use
 [Semantic Versioning](https://semver.org/).
 
-## Unreleased
+## [0.3.0] - 2026-11-18
 
 ### Fixed
 
@@ -22,14 +22,18 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **(breaking)** A bare positional word is always the pattern now. Use `.`,
+  `..`, `/`, or a path containing `/` to select a different search root;
+  previously an existing directory name was silently treated as the root.
+- **(breaking)** `-X/--exec` and `--exec-batch` now reject output flags that
+  cannot apply (`--json`, `-l`, `-0`, `--lines`) instead of ignoring them.
 - Symlink cycle detection uses a persistent ancestor chain, so extending it is
   O(1) per directory instead of cloning a hash set.
 - Idle workers back off with short sleeps instead of spinning at full CPU while
   another worker is busy with a slow entry (`--hash`, `--lines`).
-- With `--sort`, `-X/--exec` now runs after sorting. `-X` and `--exec-batch`
-  reject output flags that cannot apply (`--json`, `-l`, `-0`, `--lines`).
-- MSRV raised to Rust 1.88 (required by the current `globset` release) and
-  verified in CI.
+- With `--sort`, `-X/--exec` now runs after sorting.
+- **(breaking)** MSRV raised to Rust 1.88 (let-chains and the current `globset`
+  release) and verified in CI.
 
 ### Documentation
 
