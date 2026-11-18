@@ -13,11 +13,11 @@ Designed as a fast, modern alternative to `find` with work-stealing concurrency,
 
 - **Work-Stealing Concurrency:** Parallel directory traversal powered by `crossbeam-deque` and thread pools scaled to CPU cores (configurable with `-j, --threads`).
 - **Direct Syscalls:** Uses Linux `getdents64` directly instead of libc `readdir` wrappers; lazy `statx` calls only when metadata filters or long listings are requested.
-- **Hierarchical .gitignore & Smart Defaults:** Automatically respects root and nested `.gitignore` files, while ignoring VCS folders (`.git`, `.hg`, `.svn`), dependency trees (`node_modules`, `target`, `.cargo`, `.gradle`), and virtual filesystems (`/proc`, `/sys`, `/dev`, `/run`) unless `--no-ignore` is passed.
+- **Hierarchical .gitignore & Smart Defaults:** Automatically respects root and nested `.gitignore` files, while ignoring VCS folders (`.git`, `.hg`, `.svn`), dependency and cache trees (`node_modules`, `target`, `.cargo`, `.gradle`, `.cache`, `__pycache__`), and virtual filesystems (`/proc`, `/sys`, `/dev`, `/run`) unless `--no-ignore` is passed.
 - **Cycle-Safe Symlink Following:** Follow symbolic links (`-L, --follow`) with lock-free ancestor cycle detection, preventing infinite directory recursion.
 - **Absolute Paths & JSON Streaming:** Output absolute paths (`-a, --absolute-path`) and streaming JSON objects (`--json`) for automated pipelines and AI agent workflows.
-- **Zero-Allocation Fuzzy Engine:** $O(N)$ greedy subsequence matching with word boundary bonuses and consecutive match weighting (`-z`, `--fuzzy`), sorted by relevance score by default. Hot-path matching uses stack buffers without heap allocations.
-- **Fast Extension Filtering:** Match single or multiple file extensions (`-e, --extension rs,toml`) in $O(1)$ without heap allocations.
+- **Zero-Allocation Fuzzy Engine:** $O(N)$ greedy subsequence matching with word boundary bonuses and consecutive match weighting (`-z`, `--fuzzy`), sorted by relevance score by default. The hot path stays on stack buffers; only names containing non-ASCII bytes allocate for a Unicode-correct lowercase fold.
+- **Fast Extension Filtering:** Match single or multiple file extensions (`-e, --extension rs,toml`) case-insensitively, without extra heap allocations for ASCII names.
 - **Flexible Pattern Matching:** Substring, exact match (`-x`), globs (`-g`), regular expressions (`-r`), and file content inspection (`-C`).
 - **Metadata Filters:** Filter by file size (`--size`), modification age (`--changed`), owner (`--owner`), empty files/directories (`--empty`), entry type (`-t`), and depth bounds (`--min-depth`, `--max-depth`).
 - **Pipeline-Safe Summary:** `--summary` aggregates counts, total size, largest file, and average size to `stderr`, keeping `stdout` clean for pipelines.
@@ -25,7 +25,7 @@ Designed as a fast, modern alternative to `find` with work-stealing concurrency,
 
 ## Benchmarks
 
-Benchmarked with [`hyperfine`](https://github.com/sharkdp/hyperfine) on Linux x86_64 across system trees with warm cache (`--warmup 3`).
+Benchmarked with [`hyperfine`](https://github.com/sharkdp/hyperfine) on Linux x86_64 across system trees with warm cache (`--warmup 3`). Absolute numbers depend on CPU, kernel, and page cache; reproduce them on your machine with [`scripts/bench.sh`](scripts/bench.sh).
 
 ### 1. Substring search in `/usr/share` (~300,000 files)
 
@@ -58,8 +58,8 @@ hyperfine --warmup 3 'ffind -e h /usr/include' 'fd -e h "" /usr/include' 'find /
 Static and dynamically linked builds for x86_64 Linux are attached to every [GitHub Release](https://github.com/Sqrilizz/ffind/releases/latest):
 
 ```bash
-curl -LO https://github.com/Sqrilizz/ffind/releases/latest/download/ffind-v0.2.0-x86_64-linux-musl.tar.gz
-tar -xzf ffind-v0.2.0-x86_64-linux-musl.tar.gz
+curl -LO https://github.com/Sqrilizz/ffind/releases/latest/download/ffind-v0.2.1-x86_64-linux-musl.tar.gz
+tar -xzf ffind-v0.2.1-x86_64-linux-musl.tar.gz
 install -m 755 ffind-*-x86_64-linux-musl/ffind ~/.local/bin/
 ```
 
@@ -82,7 +82,7 @@ paru -S ffind-rs-bin    # prebuilt binary from GitHub Releases
 ### Prerequisites
 
 - Linux kernel >= 4.11 (with `statx` support)
-- Rust 1.85+ (Edition 2024)
+- Rust 1.88+ (Edition 2024)
 
 ### Build from source
 
@@ -129,6 +129,10 @@ ffind --json -m 1
 # Follow directory symlinks
 ffind -L target.txt
 ```
+
+Positional arguments: a bare word is always the search pattern. To select a
+different search root, pass `.`, `..`, `/`, or any path containing a `/`
+(for example `./src`).
 
 ## Usage & Options
 
@@ -177,14 +181,14 @@ ffind -L target.txt
 | `--lines` | Count newlines of matched files (streamed in fixed 64 KiB chunks; binary files detected by NUL in the first chunk report 0); enables `--sort lines` and adds total lines to `--summary` |
 | `--sort <size\|mtime\|name\|lines\|score>` | Sort collected results (score sorts by fuzzy relevance) |
 | `-R, --reverse` | Reverse sorting order |
-| `--limit <NUM>` | Limit number of results. Stops traversal early in streaming mode; with `--sort`, `--exec-batch` or `--tree` the tree is walked fully and results are cut after sorting/collection |
-| `-j, --threads <NUM>` | Set number of worker threads (default: available CPU cores) |
+| `--limit <NUM>` | Limit number of results. Stops traversal early in streaming mode; with `--sort`, `--exec-batch` or `--tree` the tree is walked fully and results are cut after sorting/collection. `-z/--fuzzy` implies score sorting, so it also collects |
+| `-j, --threads <NUM>` | Set number of worker threads (default: available CPU cores; valid range 1-1024) |
 | `-0, --print0` | Delimit results with a null byte (for `xargs -0`) |
-| `--color <auto\|always\|never>` | Control colored output (respects `LS_COLORS`) |
+| `--color <auto\|always\|never>` | Control colored output (auto colors only when stdout is a TTY) |
 | `--tree` | Print matches as a minimal Unicode tree (mutually exclusive with `--json`, `-l`, `-0`, `-X`, `--exec-batch`). Collects all matches in memory like `--sort`, so streaming is disabled |
 | `--time` | Measure execution time and matched count (outputs to `stderr`) |
-| `-X, --exec <CMD>...` | Execute command for each match individually (placeholders: `{}` full path, `{/}` file name, `{//}` parent dir, `{/.}` file stem) |
-| `--exec-batch <CMD>...` | Execute command once with all matching paths as arguments (append paths if no placeholder given) |
+| `-X, --exec <CMD>...` | Execute command for each match individually (placeholders: `{}` full path, `{/}` file name, `{//}` parent dir, `{/.}` file stem). Conflicting output flags: `--json`, `-l`, `-0`, `--lines` |
+| `--exec-batch <CMD>...` | Execute command once with all matching paths as arguments (append paths if no placeholder given). Conflicting output flags: `--json`, `-l`, `-0`, `--lines` |
 | `--generate-completions <SHELL>` | Output completion script (`bash`, `zsh`, `fish`, etc.) |
 
 ## Examples
@@ -214,6 +218,10 @@ ffind --json -m 1 Cargo.toml
 ffind --json --owner root -m 1 /etc/hostname
 # {"path":"/etc/hostname","type":"file","size":13,"mtime":1699999999,"mode":33188,"is_exec":false,"uid":0}
 ```
+
+Non-UTF-8 names never break the stream: invalid bytes are replaced with `U+FFFD` in the `path` field instead of aborting the run.
+
+`--summary` also works with `-X/--exec`: executed matches are counted and the report still goes to `stderr`.
 
 ### Summary Statistics
 `--summary` writes aggregated statistics to `stderr`. It works seamlessly in terminal sessions and UNIX pipelines:
@@ -320,6 +328,12 @@ ffind -t f --sort size --limit 5 -l
 # Most recently modified files at depth >= 2
 ffind --min-depth 2 --sort mtime --limit 10
 ```
+
+Modes that need a final ordering or a single batch (`--sort`, `--tree`,
+`--exec-batch`, and `-z/--fuzzy`, which implies score sorting) collect every
+match in memory before emitting results. `--limit` still applies, but only
+after that collection; add a narrower `--max-depth` or pattern on very large
+trees.
 
 ## Architecture
 
