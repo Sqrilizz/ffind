@@ -13,7 +13,7 @@ pkgbase = ffind-rs
 	conflicts = ffind
 	conflicts = ffind-rs-bin
 	options = !lto
-	source = ffind-rs::git+https://github.com/Sqrilizz/ffind.git#tag=v0.2.1
+	source = ffind-rs::git+https://github.com/Sqrilizz/ffind.git#tag=v0.3.0
 	sha256sums = SKIP
 
 pkgname = ffind-rs
