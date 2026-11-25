@@ -6,6 +6,7 @@ mod color;
 mod dirent;
 mod exec;
 mod formatter;
+mod io_util;
 mod matcher;
 mod printer;
 mod statx;
@@ -35,6 +36,13 @@ use crate::walker::{MatchRecord, WalkContext};
 
 const DEFAULT_HASH_MAX_SIZE_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_THREADS: usize = 1024;
+
+fn write_completions<W: Write>(shell: clap_complete::Shell, writer: &mut W) -> io::Result<()> {
+    let mut buffer = Vec::new();
+    clap_complete::generate(shell, &mut Cli::command(), "ffind", &mut buffer);
+    writer.write_all(&buffer)?;
+    writer.flush()
+}
 
 fn resolve_owner(specs: &[String]) -> Result<Option<Arc<Vec<u32>>>> {
     if specs.is_empty() {
@@ -75,7 +83,13 @@ fn main() -> Result<()> {
     }
 
     if let Some(shell) = cli.generate_completions {
-        clap_complete::generate(shell, &mut Cli::command(), "ffind", &mut io::stdout());
+        let stdout = io::stdout();
+        let mut writer = stdout.lock();
+        match write_completions(shell, &mut writer) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {}
+            Err(err) => return Err(err.into()),
+        }
         return Ok(());
     }
 
@@ -281,7 +295,13 @@ fn main() -> Result<()> {
                     s.update(record);
                 }
             }
-            tree::print_tree(&records, &cli.path, &colorizer)?;
+            let stdout = io::stdout();
+            let mut writer = BufWriter::new(stdout.lock());
+            match tree::print_tree(&records, &cli.path, &colorizer, cli.follow, &mut writer) {
+                Ok(()) => {}
+                Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {}
+                Err(err) => return Err(err.into()),
+            }
         } else if let Some(executor) = &executor {
             for record in &records {
                 if let Some(s) = &mut summary {
@@ -396,5 +416,23 @@ mod tests {
     fn test_resolve_owner_unknown_name() {
         let err = resolve_owner(&specs("no_such_user_ffind")).unwrap_err();
         assert!(err.to_string().contains("unknown user"));
+    }
+
+    struct BrokenPipeWriter;
+
+    impl Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_write_completions_returns_broken_pipe_instead_of_panicking() {
+        let err = write_completions(clap_complete::Shell::Bash, &mut BrokenPipeWriter).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
     }
 }

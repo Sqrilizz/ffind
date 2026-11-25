@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
-use std::io::{self, BufWriter, Write};
+use std::ffi::{OsStr, OsString};
+use std::io::{self, Write};
 use std::path::Path;
 
 use crate::color::Colorizer;
@@ -7,8 +8,8 @@ use crate::matcher::RawType;
 use crate::walker::MatchRecord;
 
 struct Node {
-    dirs: BTreeMap<String, Node>,
-    files: BTreeMap<String, (RawType, bool)>,
+    dirs: BTreeMap<OsString, Node>,
+    files: BTreeMap<OsString, (RawType, bool)>,
 }
 
 impl Node {
@@ -30,16 +31,15 @@ impl Node {
         for component in components {
             node = node
                 .dirs
-                .entry(component.to_string_lossy().into_owned())
+                .entry(component.to_os_string())
                 .or_insert_with(Node::new);
         }
         if raw_type == RawType::Directory {
             node.dirs
-                .entry(leaf.to_string_lossy().into_owned())
+                .entry(leaf.to_os_string())
                 .or_insert_with(Node::new);
         } else {
-            node.files
-                .insert(leaf.to_string_lossy().into_owned(), (raw_type, is_exec));
+            node.files.insert(leaf.to_os_string(), (raw_type, is_exec));
         }
     }
 
@@ -95,27 +95,105 @@ fn write_branch(
     writer.write_all(b"\n")
 }
 
-pub fn print_tree(records: &[MatchRecord], root: &Path, colorizer: &Colorizer) -> io::Result<()> {
+pub fn print_tree<W: Write>(
+    records: &[MatchRecord],
+    root: &Path,
+    colorizer: &Colorizer,
+    follow: bool,
+    writer: &mut W,
+) -> io::Result<()> {
     let mut top = Node::new();
     for record in records {
         let rel = record.path.strip_prefix(root).unwrap_or(&record.path);
         top.insert(rel, record.raw_type, record.is_exec);
     }
 
-    let stdout = io::stdout();
-    let mut writer = BufWriter::new(stdout.lock());
+    let root_record = records.iter().find(|record| record.path == root);
+    let root_meta = if root_record.is_none() {
+        if follow {
+            std::fs::metadata(root).ok()
+        } else {
+            std::fs::symlink_metadata(root).ok()
+        }
+    } else {
+        None
+    };
+    let root_type = match root_record {
+        Some(record) => record.raw_type,
+        None => match &root_meta {
+            Some(meta) if meta.is_dir() => RawType::Directory,
+            Some(meta) if meta.is_file() => RawType::File,
+            Some(meta) if meta.file_type().is_symlink() => RawType::Symlink,
+            _ => RawType::Other,
+        },
+    };
+    let root_is_dir = root_type == RawType::Directory;
+    let root_is_exec = root_record.map(|record| record.is_exec).unwrap_or(false);
 
-    let root_name = root
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| ".".to_string());
-    let colored_root = colorizer.colorize(Path::new(&root_name), RawType::Directory, false);
+    let root_name = if root == Path::new("/") {
+        OsStr::new("/")
+    } else {
+        root.file_name().unwrap_or(root.as_os_str())
+    };
+    let colored_root = colorizer.colorize(Path::new(root_name), root_type, root_is_exec);
     writer.write_all(&colored_root)?;
-    if root_name != "." {
+    if root_is_dir && root.file_name().is_some() {
         writer.write_all(b"/")?;
     }
     writer.write_all(b"\n")?;
 
-    top.render(&mut writer, "", colorizer)?;
+    if root_is_dir {
+        top.render(writer, "", colorizer)?;
+    }
     writer.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::color::ColorMode;
+    use std::path::PathBuf;
+
+    fn record(path: &str, raw_type: RawType) -> MatchRecord {
+        MatchRecord {
+            path: PathBuf::from(path),
+            raw_type,
+            size: 0,
+            lines: None,
+            crc32: None,
+            mtime_sec: 0,
+            mode: 0o644,
+            is_exec: false,
+            uid: None,
+            score: 0,
+        }
+    }
+
+    fn render(records: &[MatchRecord], root: &Path) -> String {
+        let colorizer = Colorizer::new(ColorMode::Never);
+        let mut output = Vec::new();
+        print_tree(records, root, &colorizer, false, &mut output).unwrap();
+        String::from_utf8(output).unwrap()
+    }
+
+    #[test]
+    fn test_tree_unnamed_roots() {
+        assert_eq!(render(&[], Path::new("/")), "/\n");
+        assert_eq!(render(&[], Path::new("..")), "..\n");
+    }
+
+    #[test]
+    fn test_tree_file_root_has_no_trailing_slash() {
+        let records = vec![record("a.txt", RawType::File)];
+        assert_eq!(render(&records, Path::new("a.txt")), "a.txt\n");
+    }
+
+    #[test]
+    fn test_tree_directory_root_has_trailing_slash() {
+        let records = vec![
+            record("src", RawType::Directory),
+            record("src/main.rs", RawType::File),
+        ];
+        assert_eq!(render(&records, Path::new("src")), "src/\n└── main.rs\n");
+    }
 }

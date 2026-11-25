@@ -15,6 +15,16 @@ pub fn format_mode(mode: u32, raw_type: RawType) -> String {
         }
     }
 
+    if mode & 0o4000 != 0 {
+        chars[3] = if mode & 0o100 != 0 { 's' } else { 'S' };
+    }
+    if mode & 0o2000 != 0 {
+        chars[6] = if mode & 0o010 != 0 { 's' } else { 'S' };
+    }
+    if mode & 0o1000 != 0 {
+        chars[9] = if mode & 0o001 != 0 { 't' } else { 'T' };
+    }
+
     chars.into_iter().collect()
 }
 
@@ -77,6 +87,16 @@ mod tests {
         assert_eq!(format_mode(0o755, RawType::Directory), "drwxr-xr-x");
         assert_eq!(format_mode(0o644, RawType::File), "-rw-r--r--");
         assert_eq!(format_mode(0o777, RawType::Symlink), "lrwxrwxrwx");
+    }
+
+    #[test]
+    fn test_format_mode_special_bits() {
+        assert_eq!(format_mode(0o4755, RawType::File), "-rwsr-xr-x");
+        assert_eq!(format_mode(0o4644, RawType::File), "-rwSr--r--");
+        assert_eq!(format_mode(0o2755, RawType::File), "-rwxr-sr-x");
+        assert_eq!(format_mode(0o2644, RawType::File), "-rw-r-Sr--");
+        assert_eq!(format_mode(0o1777, RawType::Directory), "drwxrwxrwt");
+        assert_eq!(format_mode(0o1666, RawType::Directory), "drw-rw-rwT");
     }
 
     #[test]

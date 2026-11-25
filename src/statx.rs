@@ -137,7 +137,7 @@ fn parse_datetime_threshold(s: &str) -> Result<i64> {
                 .next()
                 .and_then(|v| v.parse().ok())
                 .with_context(|| format!("invalid time of day: '{s}'"))?;
-            if fields.next().is_some() || hour > 23 || minute > 59 {
+            if fields.next().is_some() || !(0..=23).contains(&hour) || !(0..=59).contains(&minute) {
                 anyhow::bail!("invalid time of day: '{s}'");
             }
             (hour, minute)
@@ -152,7 +152,12 @@ fn parse_datetime_threshold(s: &str) -> Result<i64> {
     tm.tm_min = minute;
     tm.tm_isdst = -1;
     let epoch = unsafe { libc::mktime(&mut tm) };
-    if epoch < 0 {
+    if tm.tm_year != year - 1900
+        || tm.tm_mon != month - 1
+        || tm.tm_mday != day
+        || tm.tm_hour != hour
+        || tm.tm_min != minute
+    {
         anyhow::bail!("invalid date: '{s}'");
     }
     Ok(epoch)
@@ -231,8 +236,8 @@ impl TimeFilter {
     #[inline]
     pub fn matches(&self, actual_mtime_sec: i64) -> bool {
         match *self {
-            Self::Newer(threshold) => actual_mtime_sec >= threshold,
-            Self::Older(threshold) => actual_mtime_sec <= threshold,
+            Self::Newer(threshold) => actual_mtime_sec > threshold,
+            Self::Older(threshold) => actual_mtime_sec < threshold,
         }
     }
 }
@@ -322,6 +327,15 @@ mod tests {
 
         let filter_month = TimeFilter::parse("-1M", now).unwrap();
         assert_eq!(filter_month, TimeFilter::Newer(now - 30 * 86400));
+    }
+
+    #[test]
+    fn test_time_filter_excludes_exact_cutoff() {
+        let threshold = 1_000_000;
+        assert!(!TimeFilter::Newer(threshold).matches(threshold));
+        assert!(TimeFilter::Newer(threshold).matches(threshold + 1));
+        assert!(!TimeFilter::Older(threshold).matches(threshold));
+        assert!(TimeFilter::Older(threshold).matches(threshold - 1));
     }
 
     #[test]
@@ -450,8 +464,11 @@ mod tests {
         assert!(TimeFilter::parse_cutoff("2026-02-30", now).is_err());
         assert!(TimeFilter::parse_cutoff("2026-02-29", now).is_err());
         assert!(TimeFilter::parse_cutoff("2024-02-29", now).is_ok());
+        assert!(TimeFilter::parse_cutoff("1960-01-01", now).unwrap() < 0);
         assert!(TimeFilter::parse_cutoff("2026-01-01T25:00", now).is_err());
         assert!(TimeFilter::parse_cutoff("2026-01-01T00:60", now).is_err());
+        assert!(TimeFilter::parse_cutoff("2026-01-01T-1:00", now).is_err());
+        assert!(TimeFilter::parse_cutoff("2026-01-01T00:-1", now).is_err());
         assert!(TimeFilter::parse_cutoff("not-a-date", now).is_err());
     }
 }

@@ -1,4 +1,4 @@
-use clap::{Parser, ValueEnum};
+use clap::{ArgGroup, Parser, ValueEnum};
 use std::path::{Path, PathBuf};
 
 use crate::color::ColorMode;
@@ -26,7 +26,12 @@ pub enum SortBy {
 #[command(
     name = "ffind",
     version,
-    about = "High-performance multi-threaded file finder"
+    about = "High-performance multi-threaded file finder",
+    group(
+        ArgGroup::new("matching-mode")
+            .args(["exact", "glob", "regex", "fuzzy"])
+            .multiple(false)
+    )
 )]
 pub struct Cli {
     #[arg(value_name = "PATTERN")]

@@ -71,7 +71,12 @@ pub fn write_record<W: Write>(
                 None
             },
         };
-        serde_json::to_writer(&mut *writer, &json_record).map_err(io::Error::other)?;
+        serde_json::to_writer(&mut *writer, &json_record).map_err(|err| {
+            match err.io_error_kind() {
+                Some(kind) => io::Error::new(kind, err),
+                None => io::Error::other(err),
+            }
+        })?;
         writer.write_all(&[delimiter])?;
         return Ok(());
     }
@@ -339,5 +344,44 @@ mod tests {
         assert!(line.contains("\"size\":1234"));
         assert!(line.contains("\"crc32\":\"deadbeef\""));
         assert!(line.contains("\"uid\":1000"));
+    }
+
+    struct BrokenPipeWriter;
+
+    impl Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_write_record_json_preserves_broken_pipe() {
+        let record = MatchRecord {
+            path: PathBuf::from("src/main.rs"),
+            raw_type: RawType::File,
+            size: 1,
+            lines: None,
+            crc32: None,
+            mtime_sec: 0,
+            mode: 0o100644,
+            is_exec: false,
+            uid: None,
+            score: 0,
+        };
+        let colorizer = Colorizer::new(crate::color::ColorMode::Never);
+        let err = write_record(
+            &mut BrokenPipeWriter,
+            &record,
+            &colorizer,
+            false,
+            true,
+            b'\n',
+        )
+        .unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
     }
 }

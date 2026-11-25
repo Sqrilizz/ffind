@@ -11,12 +11,12 @@ use anyhow::Result;
 use crossbeam_channel::Sender;
 use crossbeam_deque::{Injector, Stealer, Worker};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
-use std::io::Read;
 use std::sync::Mutex;
 
 use crate::cli::Cli;
 use crate::dirent::DirectoryReader;
 use crate::exec::CommandExecutor;
+use crate::io_util::read_retry;
 use crate::matcher::{ContentMatcher, Matcher, RawType};
 use crate::printer::Summary;
 use crate::statx::{SizeFilter, TimeFilter, query_statx};
@@ -158,8 +158,9 @@ impl EntryEvaluator {
 
         let mut hasher = crc32fast::Hasher::new();
         loop {
-            let Ok(n) = file.read(&mut self.read_buf) else {
-                return None;
+            let n = match read_retry(&mut file, &mut self.read_buf) {
+                Ok(n) => n,
+                Err(_) => return None,
             };
             if n == 0 {
                 return Some(hasher.finalize());
@@ -168,25 +169,24 @@ impl EntryEvaluator {
         }
     }
 
-    fn count_lines(&mut self, path: &Path) -> u64 {
-        let Ok(mut file) = std::fs::File::open(path) else {
-            return 0;
-        };
+    fn count_lines(&mut self, path: &Path) -> Option<u64> {
+        let mut file = std::fs::File::open(path).ok()?;
 
         let mut lines = 0u64;
         let mut first_chunk = true;
         loop {
-            let Ok(n) = file.read(&mut self.read_buf) else {
-                return 0;
+            let n = match read_retry(&mut file, &mut self.read_buf) {
+                Ok(n) => n,
+                Err(_) => return None,
             };
             if n == 0 {
-                return lines;
+                return Some(lines);
             }
             let chunk = &self.read_buf[..n];
             if first_chunk {
                 first_chunk = false;
                 if memchr::memchr(0, chunk).is_some() {
-                    return 0;
+                    return Some(0);
                 }
             }
             lines += memchr::memchr_iter(b'\n', chunk).count() as u64;
@@ -232,7 +232,8 @@ impl EntryEvaluator {
             || self.filters.time_filter.is_some()
             || self.filters.owners.is_some()
         {
-            match query_statx(path, self.filters.follow) {
+            let follow_metadata = self.filters.follow && raw_type != RawType::Symlink;
+            match query_statx(path, follow_metadata) {
                 Ok(file_meta) => {
                     size = file_meta.size;
                     mtime_sec = file_meta.mtime_sec;
@@ -260,6 +261,7 @@ impl EntryEvaluator {
                     if self.filters.size_filter.is_some()
                         || self.filters.time_filter.is_some()
                         || self.filters.owners.is_some()
+                        || self.filters.empty
                     {
                         matches_all = false;
                     }
@@ -313,7 +315,7 @@ impl EntryEvaluator {
         }
 
         if self.filters.needs_lines {
-            stats.lines = Some(self.count_lines(path));
+            stats.lines = self.count_lines(path);
         }
 
         if let Some(max_size) = self.filters.hash_max_size
@@ -461,6 +463,12 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
         RawType::Other
     };
 
+    // Detect the filesystem root by identity so `.` from `/` behaves like `/`.
+    let root_is_fs_root = meta.is_dir()
+        && std::fs::metadata("/")
+            .map(|root_meta| root_meta.dev() == meta.dev() && root_meta.ino() == meta.ino())
+            .unwrap_or(false);
+
     let walker_limit = if cli.sort.is_some() || cli.exec_batch.is_some() || cli.tree {
         None
     } else {
@@ -482,6 +490,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
 
     let mut root_evaluator = EntryEvaluator::new(filters.clone());
     let exec_failures = Arc::clone(&ctx.exec_failures);
+    let walk_failures = Arc::new(Mutex::new(None));
     let exec_summary = ctx.exec_summary.clone();
     let root_sink = MatchSink {
         counter: &ctx.match_counter,
@@ -562,6 +571,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
     let stealers = Arc::new(stealers);
 
     let mut handles = Vec::with_capacity(thread_count);
+    let mut spawn_error = None;
 
     for (worker_index, worker) in workers.into_iter().enumerate() {
         let injector = Arc::clone(&injector);
@@ -571,6 +581,7 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
         let matcher = Arc::clone(&ctx.matcher);
         let executor = ctx.executor.as_ref().map(Arc::clone);
         let failures = Arc::clone(&exec_failures);
+        let read_failures = Arc::clone(&walk_failures);
         let summary = exec_summary.clone();
         let exclude = Arc::clone(&ctx.exclude);
         let sender = sender.clone();
@@ -589,223 +600,274 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
             .map(|(_, s)| s.clone())
             .collect();
 
-        let handle = thread::spawn(move || {
-            let mut reader = DirectoryReader::new();
-            let mut evaluator = EntryEvaluator::new(filters);
-            let sink = MatchSink {
-                counter: &match_counter,
-                stop_flag: &stop_flag,
-                limit: walker_limit,
-                executor: executor.as_deref(),
-                failures: &failures,
-                summary: summary.as_deref(),
-                sender: &sender,
-            };
-            let mut was_active = false;
-            let mut idle_spins = 0u32;
+        let spawn_result = thread::Builder::new()
+            .name(format!("ffind-worker-{worker_index}"))
+            .spawn(move || {
+                let mut reader = DirectoryReader::new();
+                let mut evaluator = EntryEvaluator::new(filters);
+                let sink = MatchSink {
+                    counter: &match_counter,
+                    stop_flag: &stop_flag,
+                    limit: walker_limit,
+                    executor: executor.as_deref(),
+                    failures: &failures,
+                    summary: summary.as_deref(),
+                    sender: &sender,
+                };
+                let mut was_active = false;
+                let mut idle_spins = 0u32;
 
-            loop {
-                if stop_flag.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                if let Some(task) = find_task(&worker, &injector, &thread_stealers) {
-                    idle_spins = 0;
-                    if !was_active {
-                        active_threads.fetch_add(1, Ordering::SeqCst);
-                        was_active = true;
+                loop {
+                    if stop_flag.load(Ordering::Relaxed) {
+                        break;
                     }
 
-                    let task_path = task.path;
-                    let next_depth = task.depth + 1;
-                    let is_at_root_mount = task_path == Path::new("/");
-
-                    let _ = reader.read_entries(&task_path, |entry| {
-                        // Entries deeper than --max-depth are never matched
-                        // (find -maxdepth semantics: the start point is depth 0).
-                        if let Some(max) = max_depth
-                            && next_depth > max
-                        {
-                            return Ok(());
+                    if let Some(task) = find_task(&worker, &injector, &thread_stealers) {
+                        idle_spins = 0;
+                        if !was_active {
+                            active_threads.fetch_add(1, Ordering::SeqCst);
+                            was_active = true;
                         }
 
-                        if !hidden && entry.name.first() == Some(&b'.') {
-                            return Ok(());
-                        }
+                        let task_path = task.path;
+                        let next_depth = task.depth + 1;
+                        let skip_virtual_fs = task.depth == 0 && root_is_fs_root;
 
-                        let is_symlink = entry.raw_type == RawType::Symlink;
-                        let is_native_dir = entry.raw_type == RawType::Directory;
+                        let read_result = reader.read_entries(&task_path, |entry| {
+                            if stop_flag.load(Ordering::Relaxed) {
+                                return Ok(());
+                            }
 
-                        let (effective_raw_type, is_directory) = if follow && is_symlink {
-                            let symlink_path = task_path.join(OsStr::from_bytes(entry.name));
-                            if let Ok(target_meta) = std::fs::metadata(&symlink_path) {
-                                if target_meta.is_dir() {
-                                    (RawType::Directory, true)
-                                } else if target_meta.is_file() {
-                                    (RawType::File, false)
+                            // Entries deeper than --max-depth are never matched
+                            // (find -maxdepth semantics: the start point is depth 0).
+                            if let Some(max) = max_depth
+                                && next_depth > max
+                            {
+                                return Ok(());
+                            }
+
+                            if !hidden && entry.name.first() == Some(&b'.') {
+                                return Ok(());
+                            }
+
+                            let is_symlink = entry.raw_type == RawType::Symlink;
+                            let is_native_dir = entry.raw_type == RawType::Directory;
+
+                            let (effective_raw_type, is_directory) = if follow && is_symlink {
+                                let symlink_path = task_path.join(OsStr::from_bytes(entry.name));
+                                if let Ok(target_meta) = std::fs::metadata(&symlink_path) {
+                                    if target_meta.is_dir() {
+                                        (RawType::Directory, true)
+                                    } else if target_meta.is_file() {
+                                        (RawType::File, false)
+                                    } else {
+                                        (RawType::Other, false)
+                                    }
                                 } else {
-                                    (RawType::Other, false)
+                                    (RawType::Symlink, false)
                                 }
                             } else {
-                                (RawType::Symlink, false)
-                            }
-                        } else {
-                            (entry.raw_type, is_native_dir)
-                        };
-
-                        if is_at_root_mount && is_directory && is_virtual_fs(entry.name) {
-                            return Ok(());
-                        }
-
-                        if !no_ignore && is_directory && is_smart_ignored(entry.name) {
-                            return Ok(());
-                        }
-
-                        if !exclude.is_empty() {
-                            let entry_name_str = String::from_utf8_lossy(entry.name);
-                            for ex in exclude.iter() {
-                                if entry_name_str.contains(ex.as_str()) {
-                                    return Ok(());
-                                }
-                            }
-                        }
-
-                        let match_score = matcher.matches(entry.name, effective_raw_type);
-                        let entry_matched = match_score.is_some();
-
-                        if !entry_matched && !is_directory {
-                            return Ok(());
-                        }
-
-                        let child_path = task_path.join(OsStr::from_bytes(entry.name));
-
-                        if !no_ignore && !task.gitignores.is_empty() {
-                            for gi in task.gitignores.iter().rev() {
-                                match gi.matched_path_or_any_parents(&child_path, is_directory) {
-                                    ignore::Match::Whitelist(_) => break,
-                                    ignore::Match::Ignore(_) => return Ok(()),
-                                    ignore::Match::None => continue,
-                                }
-                            }
-                        }
-
-                        if entry_matched
-                            && let Some(mut stats) = evaluator.evaluate(
-                                match_score,
-                                effective_raw_type,
-                                &child_path,
-                                next_depth,
-                                0,
-                            )
-                            && sink.acquire()
-                        {
-                            evaluator.fill_heavy(&mut stats, effective_raw_type, &child_path);
-                            sink.emit(&child_path, effective_raw_type, stats);
-                        }
-
-                        if is_directory {
-                            let can_recurse = match max_depth {
-                                Some(max) => next_depth < max,
-                                None => true,
+                                (entry.raw_type, is_native_dir)
                             };
 
-                            if can_recurse {
-                                let mut should_descend = true;
+                            if !no_ignore
+                                && skip_virtual_fs
+                                && is_directory
+                                && is_virtual_fs(entry.name)
+                            {
+                                return Ok(());
+                            }
 
-                                let child_ancestors = if let Some(ancestors) = &task.ancestors {
-                                    if let Ok(dir_meta) = std::fs::metadata(&child_path) {
-                                        let dev = dir_meta.dev();
-                                        let ino = dir_meta.ino();
-                                        if ancestors.contains(dev, ino) {
-                                            should_descend = false;
-                                            None
-                                        } else {
-                                            Some(Arc::new(AncestorNode {
-                                                dev,
-                                                ino,
-                                                parent: Some(Arc::clone(ancestors)),
-                                            }))
-                                        }
-                                    } else {
-                                        should_descend = false;
-                                        None
+                            if !no_ignore && is_directory && is_smart_ignored(entry.name) {
+                                return Ok(());
+                            }
+
+                            if !exclude.is_empty() {
+                                let entry_name_str = String::from_utf8_lossy(entry.name);
+                                for ex in exclude.iter() {
+                                    if entry_name_str.contains(ex.as_str()) {
+                                        return Ok(());
                                     }
-                                } else {
-                                    None
+                                }
+                            }
+
+                            let match_score = matcher.matches(entry.name, effective_raw_type);
+                            let entry_matched = match_score.is_some();
+
+                            if !entry_matched && !is_directory {
+                                return Ok(());
+                            }
+
+                            let child_path = task_path.join(OsStr::from_bytes(entry.name));
+
+                            if !no_ignore && !task.gitignores.is_empty() {
+                                for gi in task.gitignores.iter().rev() {
+                                    match gi.matched_path_or_any_parents(&child_path, is_directory)
+                                    {
+                                        ignore::Match::Whitelist(_) => break,
+                                        ignore::Match::Ignore(_) => return Ok(()),
+                                        ignore::Match::None => continue,
+                                    }
+                                }
+                            }
+
+                            if entry_matched
+                                && let Some(mut stats) = evaluator.evaluate(
+                                    match_score,
+                                    effective_raw_type,
+                                    &child_path,
+                                    next_depth,
+                                    0,
+                                )
+                                && sink.acquire()
+                            {
+                                evaluator.fill_heavy(&mut stats, effective_raw_type, &child_path);
+                                sink.emit(&child_path, effective_raw_type, stats);
+                            }
+
+                            if is_directory {
+                                let can_recurse = match max_depth {
+                                    Some(max) => next_depth < max,
+                                    None => true,
                                 };
 
-                                if should_descend && let Some(expected_dev) = root_dev {
-                                    let child_meta_res = if follow {
-                                        std::fs::metadata(&child_path)
-                                    } else {
-                                        std::fs::symlink_metadata(&child_path)
-                                    };
-                                    let same_filesystem = child_meta_res
-                                        .map(|child_meta| child_meta.dev() == expected_dev)
-                                        .unwrap_or(false);
-                                    if !same_filesystem {
-                                        should_descend = false;
-                                    }
-                                }
+                                if can_recurse {
+                                    let mut should_descend = true;
 
-                                if should_descend {
-                                    let mut child_gitignores = Arc::clone(&task.gitignores);
-                                    if !no_ignore {
-                                        let child_gi_file = child_path.join(".gitignore");
-                                        if child_gi_file.is_file() {
-                                            let mut builder = GitignoreBuilder::new(&child_path);
-                                            let _ = builder.add(child_gi_file);
-                                            if let Ok(gi) = builder.build() {
-                                                let mut new_stack = (*child_gitignores).clone();
-                                                new_stack.push(gi);
-                                                child_gitignores = Arc::new(new_stack);
+                                    let child_ancestors = if let Some(ancestors) = &task.ancestors {
+                                        if let Ok(dir_meta) = std::fs::metadata(&child_path) {
+                                            let dev = dir_meta.dev();
+                                            let ino = dir_meta.ino();
+                                            if ancestors.contains(dev, ino) {
+                                                should_descend = false;
+                                                None
+                                            } else {
+                                                Some(Arc::new(AncestorNode {
+                                                    dev,
+                                                    ino,
+                                                    parent: Some(Arc::clone(ancestors)),
+                                                }))
                                             }
+                                        } else {
+                                            should_descend = false;
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
+
+                                    if should_descend && let Some(expected_dev) = root_dev {
+                                        let child_meta_res = if follow {
+                                            std::fs::metadata(&child_path)
+                                        } else {
+                                            std::fs::symlink_metadata(&child_path)
+                                        };
+                                        let same_filesystem = child_meta_res
+                                            .map(|child_meta| child_meta.dev() == expected_dev)
+                                            .unwrap_or(false);
+                                        if !same_filesystem {
+                                            should_descend = false;
                                         }
                                     }
 
-                                    worker.push(DirTask {
-                                        path: child_path,
-                                        depth: next_depth,
-                                        gitignores: child_gitignores,
-                                        ancestors: child_ancestors,
-                                    });
+                                    if should_descend {
+                                        let mut child_gitignores = Arc::clone(&task.gitignores);
+                                        if !no_ignore {
+                                            let child_gi_file = child_path.join(".gitignore");
+                                            if child_gi_file.is_file() {
+                                                let mut builder =
+                                                    GitignoreBuilder::new(&child_path);
+                                                let _ = builder.add(child_gi_file);
+                                                if let Ok(gi) = builder.build() {
+                                                    let mut new_stack = (*child_gitignores).clone();
+                                                    new_stack.push(gi);
+                                                    child_gitignores = Arc::new(new_stack);
+                                                }
+                                            }
+                                        }
+
+                                        worker.push(DirTask {
+                                            path: child_path,
+                                            depth: next_depth,
+                                            gitignores: child_gitignores,
+                                            ancestors: child_ancestors,
+                                        });
+                                    }
                                 }
+                            }
+
+                            Ok(())
+                        });
+                        if let Err(err) = read_result {
+                            let mut failure = read_failures
+                                .lock()
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                            if failure.is_none() {
+                                *failure = Some(err.context(format!(
+                                    "while reading directory '{}'",
+                                    task_path.display()
+                                )));
+                            }
+                        }
+                    } else {
+                        if was_active {
+                            active_threads.fetch_sub(1, Ordering::SeqCst);
+                            was_active = false;
+                        }
+
+                        if active_threads.load(Ordering::SeqCst) == 0 && injector.is_empty() {
+                            let all_empty = stealers.iter().all(|s| s.is_empty());
+                            if all_empty {
+                                break;
                             }
                         }
 
-                        Ok(())
-                    });
-                } else {
-                    if was_active {
-                        active_threads.fetch_sub(1, Ordering::SeqCst);
-                        was_active = false;
-                    }
-
-                    if active_threads.load(Ordering::SeqCst) == 0 && injector.is_empty() {
-                        let all_empty = stealers.iter().all(|s| s.is_empty());
-                        if all_empty {
-                            break;
+                        // Spin briefly for handoffs, then back off with short
+                        // sleeps so idle workers do not burn a core while another
+                        // thread is busy with a slow entry (`--hash`, `--lines`).
+                        if idle_spins < 8 {
+                            idle_spins += 1;
+                            thread::yield_now();
+                        } else {
+                            thread::sleep(Duration::from_micros(100));
                         }
                     }
-
-                    // Spin briefly for handoffs, then back off with short
-                    // sleeps so idle workers do not burn a core while another
-                    // thread is busy with a slow entry (`--hash`, `--lines`).
-                    if idle_spins < 8 {
-                        idle_spins += 1;
-                        thread::yield_now();
-                    } else {
-                        thread::sleep(Duration::from_micros(100));
-                    }
                 }
-            }
-        });
+            });
 
-        handles.push(handle);
+        match spawn_result {
+            Ok(handle) => handles.push(handle),
+            Err(err) => {
+                spawn_error = Some(err);
+                break;
+            }
+        }
     }
 
+    if let Some(err) = spawn_error {
+        ctx.stop_flag.store(true, Ordering::Relaxed);
+        for handle in handles {
+            let _ = handle.join();
+        }
+        return Err(anyhow::anyhow!("failed to spawn worker thread: {err}"));
+    }
+
+    let mut panicked = false;
     for handle in handles {
-        let _ = handle.join();
+        if handle.join().is_err() {
+            panicked = true;
+        }
+    }
+    if panicked {
+        return Err(anyhow::anyhow!("a worker thread panicked"));
+    }
+
+    if let Some(err) = walk_failures
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+    {
+        return Err(err);
     }
 
     if let Some(err) = exec_failures
@@ -817,4 +879,56 @@ pub fn walk(cli: &Cli, ctx: WalkContext, sender: Sender<MatchRecord>) -> Result<
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn filters(empty: bool, needs_lines: bool) -> EntryFilters {
+        EntryFilters {
+            min_depth: None,
+            content_matcher: None,
+            size_filter: None,
+            time_filter: None,
+            owners: None,
+            needs_stat: empty,
+            needs_lines,
+            hash_max_size: None,
+            empty,
+            follow: false,
+        }
+    }
+
+    #[test]
+    fn test_empty_does_not_match_when_stat_fails() {
+        let mut evaluator = EntryEvaluator::new(filters(true, false));
+        let missing = std::env::temp_dir().join("ffind_missing_empty_probe");
+        assert!(
+            evaluator
+                .evaluate(Some(0), RawType::File, &missing, 1, 0)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_count_lines_returns_none_for_unreadable_path() {
+        let mut evaluator = EntryEvaluator::new(filters(false, true));
+        let missing = std::env::temp_dir().join("ffind_missing_lines_probe");
+        assert_eq!(evaluator.count_lines(&missing), None);
+    }
+
+    #[test]
+    fn test_count_lines_counts_text_and_flags_binary() {
+        let mut evaluator = EntryEvaluator::new(filters(false, true));
+        let path = std::env::temp_dir().join(format!("ffind_lines_probe_{}", std::process::id()));
+
+        std::fs::write(&path, b"a\nb\n").unwrap();
+        assert_eq!(evaluator.count_lines(&path), Some(2));
+
+        std::fs::write(&path, b"a\0b\nc\n").unwrap();
+        assert_eq!(evaluator.count_lines(&path), Some(0));
+
+        let _ = std::fs::remove_file(path);
+    }
 }

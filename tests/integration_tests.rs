@@ -1,7 +1,8 @@
+use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Write;
 use std::os::unix::ffi::OsStringExt;
-use std::os::unix::fs::{MetadataExt, symlink};
+use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -51,6 +52,38 @@ fn run_ffind(args: &[&str], cwd: &Path) -> (String, String, bool) {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     (stdout, stderr, output.status.success())
+}
+
+fn run_ffind_with_closed_stdout(args: &[&str], cwd: &Path) -> std::process::ExitStatus {
+    use std::os::unix::io::FromRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let mut fds = [0i32; 2];
+    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+    unsafe {
+        libc::close(fds[0]);
+    }
+    let stdout = unsafe { File::from_raw_fd(fds[1]) };
+
+    let bin = env!("CARGO_BIN_EXE_ffind");
+    let mut command = Command::new(bin);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::piped());
+
+    unsafe {
+        command.pre_exec(|| {
+            libc::signal(libc::SIGPIPE, libc::SIG_IGN);
+            Ok(())
+        });
+    }
+
+    command
+        .output()
+        .expect("failed to execute ffind binary")
+        .status
 }
 
 #[test]
@@ -111,6 +144,16 @@ fn test_broken_symlink() {
     let (stdout_regular, _, success_regular) = run_ffind(&[], &dir.path);
     assert!(success_regular);
     assert!(stdout_regular.contains("dangling_link"));
+
+    let (stdout_json, _, success_json) =
+        run_ffind(&["-L", "--json", "-x", "dangling_link"], &dir.path);
+    assert!(success_json);
+    let record: serde_json::Value = serde_json::from_str(stdout_json.trim()).unwrap();
+    let metadata = fs::symlink_metadata(&broken).unwrap();
+    assert_eq!(record["type"], "symlink");
+    assert_eq!(record["size"].as_u64(), Some(metadata.size()));
+    assert_eq!(record["mtime"].as_i64(), Some(metadata.mtime()));
+    assert_eq!(record["mode"].as_u64(), Some(metadata.mode() as u64));
 }
 
 #[test]
@@ -158,6 +201,10 @@ fn test_json_streaming_output() {
     assert!(parsed["size"].as_u64().unwrap() > 0);
     assert!(parsed["mtime"].as_i64().unwrap() > 0);
     assert!(parsed["path"].as_str().unwrap().contains("sample.rs"));
+    assert!(
+        parsed["uid"].is_u64(),
+        "json always stats entries and must expose uid: {parsed}"
+    );
 }
 
 #[test]
@@ -841,4 +888,235 @@ fn test_json_and_exec_conflict() {
 
     let (_, _, success) = run_ffind(&["--json", "txt", "-X", "echo"], &dir.path);
     assert!(!success, "--json with -X must be rejected");
+}
+
+#[test]
+fn test_matching_modes_conflict() {
+    let dir = TempTestDir::new("matching_mode_conflict");
+    dir.create_file("foo", b"x");
+
+    for conflicting in [
+        &["--exact", "--glob", "foo"][..],
+        &["--regex", "--fuzzy", "foo"][..],
+        &["--glob", "--regex", "foo"][..],
+    ] {
+        let (_, stderr, success) = run_ffind(conflicting, &dir.path);
+        assert!(!success, "conflicting modes were accepted: {conflicting:?}");
+        assert!(
+            stderr.contains("cannot be used with"),
+            "unexpected clap error: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn test_tree_file_root_has_no_trailing_slash() {
+    let dir = TempTestDir::new("tree_file_root");
+    dir.create_file("a.txt", b"x");
+
+    let (stdout, _, success) = run_ffind(&["--tree", "./a.txt"], &dir.path);
+    assert!(success);
+    assert_eq!(
+        stdout.trim_end(),
+        "a.txt",
+        "a file root is not a directory: {stdout:?}"
+    );
+}
+
+#[test]
+fn test_tree_prints_unnamed_roots_verbatim() {
+    let dir = TempTestDir::new("tree_unnamed_roots");
+
+    let (stdout, _, success) = run_ffind(&["--tree", "-m", "0", ".."], &dir.path);
+    assert!(success);
+    assert_eq!(stdout.trim_end(), "..", "got: {stdout:?}");
+
+    let (stdout, _, success) = run_ffind(&["--tree", "-m", "0", "/"], &dir.path);
+    assert!(success);
+    assert_eq!(stdout.trim_end(), "/", "got: {stdout:?}");
+}
+
+#[test]
+fn test_exec_batch_expands_all_placeholders() {
+    let dir = TempTestDir::new("exec_batch_placeholders");
+    dir.create_file("a.txt", b"x");
+    dir.create_file("sub/b.txt", b"y");
+
+    let (stdout, _, success) = run_ffind(
+        &["txt", "--exec-batch", "echo", "[{/}]", "[{/.}]", "[{//}]"],
+        &dir.path,
+    );
+    assert!(success);
+    assert!(stdout.contains("[a.txt]"), "got: {stdout:?}");
+    assert!(stdout.contains("[b.txt]"), "got: {stdout:?}");
+    assert!(stdout.contains("[a]"), "got: {stdout:?}");
+    assert!(stdout.contains("[b]"), "got: {stdout:?}");
+    assert!(
+        !stdout.contains('{'),
+        "placeholders must never reach the command literally: {stdout:?}"
+    );
+}
+
+#[test]
+fn test_long_output_shows_special_permission_bits() {
+    let dir = TempTestDir::new("special_modes");
+    let path = dir.create_file("setuid.txt", b"x");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o4755)).unwrap();
+
+    let (stdout, _, success) = run_ffind(&["-l", "setuid.txt"], &dir.path);
+    assert!(success);
+    assert!(
+        stdout.contains("rws"),
+        "setuid bit must be rendered as s: {stdout:?}"
+    );
+}
+
+#[test]
+fn test_tree_survives_closed_stdout() {
+    let dir = TempTestDir::new("tree_closed_stdout");
+    dir.create_file("a.txt", b"x");
+
+    let status = run_ffind_with_closed_stdout(&["--tree"], &dir.path);
+    assert!(
+        status.success(),
+        "a closed pipe is a normal early exit, not an error"
+    );
+}
+
+#[test]
+fn test_json_survives_closed_stdout() {
+    let dir = TempTestDir::new("json_closed_stdout");
+    dir.create_file("a.txt", b"x");
+
+    let status = run_ffind_with_closed_stdout(&["--json", "txt"], &dir.path);
+    assert!(
+        status.success(),
+        "a closed pipe must not abort JSON streaming"
+    );
+}
+
+#[test]
+fn test_completions_survive_closed_stdout() {
+    let dir = TempTestDir::new("completions_closed_stdout");
+
+    let status = run_ffind_with_closed_stdout(&["--generate-completions", "bash"], &dir.path);
+    assert!(
+        status.success(),
+        "a closed pipe must not panic while writing completions"
+    );
+}
+
+#[test]
+fn test_unreadable_directory_returns_an_error() {
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+
+    let dir = TempTestDir::new("unreadable_directory");
+    let blocked = dir.create_dir("blocked");
+    dir.create_file("blocked/secret.txt", b"secret");
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o0)).unwrap();
+
+    let (_, stderr, success) = run_ffind(&["secret"], &dir.path);
+    fs::set_permissions(&blocked, fs::Permissions::from_mode(0o700)).unwrap();
+
+    assert!(!success, "partial results must not look successful");
+    assert!(
+        stderr.contains("failed to open directory"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("blocked"), "missing failing path: {stderr}");
+}
+
+#[test]
+fn test_newer_than_excludes_exact_cutoff() {
+    use std::fs::FileTimes;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let dir = TempTestDir::new("exact_time_cutoff");
+    let equal = dir.create_file("equal.txt", b"x");
+    let after = dir.create_file("after.txt", b"x");
+    let cutoff = UNIX_EPOCH + Duration::from_secs(1_577_836_800);
+    File::options()
+        .append(true)
+        .open(equal)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(cutoff))
+        .unwrap();
+    File::options()
+        .append(true)
+        .open(after)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(cutoff + Duration::from_secs(1)))
+        .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ffind"))
+        .args(["--newer-than", "2020-01-01", "-t", "f", "txt"])
+        .current_dir(&dir.path)
+        .env("TZ", "UTC")
+        .output()
+        .expect("failed to execute ffind binary");
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("after.txt"), "stdout: {stdout}");
+    assert!(!stdout.contains("equal.txt"), "stdout: {stdout}");
+}
+
+#[test]
+fn test_exec_preserves_non_utf8_paths() {
+    let dir = TempTestDir::new("exec_non_utf8");
+    let name = OsString::from_vec(b"bad-\xff.txt".to_vec());
+    File::create(dir.path.join(name)).unwrap();
+
+    let (_, stderr, success) = run_ffind(&["txt", "-X", "test", "-f", "{}"], &dir.path);
+    assert!(success, "single exec received a corrupted path: {stderr}");
+
+    let (_, stderr, success) = run_ffind(&["txt", "--exec-batch", "test", "-f", "{}"], &dir.path);
+    assert!(success, "batch exec received a corrupted path: {stderr}");
+}
+
+#[test]
+fn test_tree_preserves_distinct_non_utf8_names() {
+    let dir = TempTestDir::new("tree_non_utf8");
+    let names = [b"bad-\xfe.txt".to_vec(), b"bad-\xff.txt".to_vec()];
+    for name in &names {
+        File::create(dir.path.join(OsString::from_vec(name.clone()))).unwrap();
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_ffind"))
+        .args(["--tree", "txt"])
+        .current_dir(&dir.path)
+        .output()
+        .expect("failed to execute ffind binary");
+    assert!(output.status.success());
+    assert_eq!(
+        output.stdout.iter().filter(|&&byte| byte == b'\n').count(),
+        3
+    );
+    for name in names {
+        assert!(
+            output
+                .stdout
+                .windows(name.len())
+                .any(|window| window == name),
+            "tree omitted or corrupted {name:?}: {:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+}
+
+#[test]
+fn test_virtual_filesystems_skipped_when_cwd_is_root() {
+    if !Path::new("/proc").exists() {
+        return;
+    }
+
+    let (stdout, _, success) = run_ffind(&["-m", "1", "-t", "d"], Path::new("/"));
+    assert!(success);
+    for name in ["proc", "sys", "dev", "run"] {
+        assert!(
+            !stdout.lines().any(|line| line == format!("./{name}")),
+            "{name} must be skipped when the start point is the filesystem root: {stdout}"
+        );
+    }
 }

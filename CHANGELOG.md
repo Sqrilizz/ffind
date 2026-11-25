@@ -4,6 +4,43 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions use
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- `--tree` no longer prints a trailing slash for a file start point, and shows
+  unnamed start points (`/`, `..`) verbatim instead of collapsing them to `.`.
+- A closed stdout (`ffind ... | head`) is treated as a normal early exit for
+  `--tree`, `--json`, and `--generate-completions` instead of reporting a
+  broken pipe or panicking.
+- `--exec-batch` now expands `{/}`, `{//}`, and `{/.}` in addition to `{}`.
+- `-l/--long` renders the setuid, setgid, and sticky bits (`s`, `S`, `t`, `T`).
+- Virtual filesystems are skipped when the current directory is `/`, matching
+  the explicit `/` start point.
+- `--empty` no longer reports entries whose metadata could not be read.
+- Reading a file that was interrupted by a signal is retried instead of being
+  treated as unreadable (`--hash`, `--lines`, `--contains`).
+- Archive names are highlighted regardless of extension case.
+- `-X/--exec` and `--exec-batch` preserve non-UTF-8 path bytes in placeholders
+  and appended arguments instead of passing a replacement-character path.
+- `--tree` keeps distinct non-UTF-8 names as separate entries and preserves
+  their original bytes.
+- Absolute date filters reject negative hours and minutes instead of letting
+  `mktime` normalize them into a different timestamp.
+- `--case-sensitive` now applies to fuzzy matching, and conflicting matching
+  modes (`-x`, `-g`, `-r`, `-z`) are rejected instead of silently prioritized.
+- Case-insensitive name and content matching no longer conflates invalid UTF-8
+  bytes with a literal replacement character, and ASCII needles use Unicode
+  case folding when file contents contain non-ASCII text.
+- `--contains` supports needles larger than the 64 KiB read buffer and keeps
+  Unicode matches intact across chunk boundaries.
+- Dangling symlinks under `-L/--follow` report their link size, mtime, and mode
+  instead of fabricated zero metadata.
+- Directory open and traversal failures are reported with a nonzero exit status
+  instead of silently returning partial results.
+- `--newer-than` and `--older-than` exclude entries exactly equal to the cutoff,
+  and absolute dates before the Unix epoch are accepted.
+
 ## [0.3.0] - 2026-11-18
 
 ### Fixed

@@ -4,11 +4,11 @@ use memchr::memmem::Finder;
 use regex::bytes::{Regex, RegexBuilder};
 use std::borrow::Cow;
 use std::ffi::OsStr;
-use std::io::Read;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::cli::{Cli, EntryType};
+use crate::io_util::read_retry;
 
 /// Lowercases `bytes` for case-insensitive matching.
 ///
@@ -23,7 +23,37 @@ fn fold_lower(bytes: &[u8]) -> Cow<'_, [u8]> {
         }
         return Cow::Borrowed(bytes);
     }
-    Cow::Owned(String::from_utf8_lossy(bytes).to_lowercase().into_bytes())
+
+    let mut folded = Vec::with_capacity(bytes.len());
+    let mut remaining = bytes;
+    while !remaining.is_empty() {
+        match std::str::from_utf8(remaining) {
+            Ok(valid) => {
+                folded.extend(valid.to_lowercase().into_bytes());
+                break;
+            }
+            Err(error) => {
+                let valid_end = error.valid_up_to();
+                folded.extend(
+                    String::from_utf8_lossy(&remaining[..valid_end])
+                        .to_lowercase()
+                        .into_bytes(),
+                );
+                match error.error_len() {
+                    Some(invalid_len) => {
+                        let invalid_end = valid_end + invalid_len;
+                        folded.extend_from_slice(&remaining[valid_end..invalid_end]);
+                        remaining = &remaining[invalid_end..];
+                    }
+                    None => {
+                        folded.extend_from_slice(&remaining[valid_end..]);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Cow::Owned(folded)
 }
 
 fn has_non_ascii(bytes: &[u8]) -> bool {
@@ -39,10 +69,18 @@ pub enum RawType {
 }
 
 pub fn fuzzy_score(needle_lower: &[u8], haystack: &[u8]) -> Option<i32> {
-    if needle_lower.is_empty() {
+    fuzzy_score_with_case(needle_lower, haystack, false)
+}
+
+fn fuzzy_score_case_sensitive(needle: &[u8], haystack: &[u8]) -> Option<i32> {
+    fuzzy_score_with_case(needle, haystack, true)
+}
+
+fn fuzzy_score_with_case(needle: &[u8], haystack: &[u8], case_sensitive: bool) -> Option<i32> {
+    if needle.is_empty() {
         return Some(0);
     }
-    if needle_lower.len() > haystack.len() {
+    if needle.len() > haystack.len() {
         return None;
     }
 
@@ -51,12 +89,16 @@ pub fn fuzzy_score(needle_lower: &[u8], haystack: &[u8]) -> Option<i32> {
     let mut prev_matched = false;
     let mut prev_byte = 0u8;
 
-    for (i, &b) in haystack.iter().enumerate() {
-        let b_lower = b.to_ascii_lowercase();
-        if b_lower == needle_lower[needle_idx] {
+    for (index, &byte) in haystack.iter().enumerate() {
+        let comparable = if case_sensitive {
+            byte
+        } else {
+            byte.to_ascii_lowercase()
+        };
+        if comparable == needle[needle_idx] {
             let mut match_score = 1i32;
 
-            let is_word_boundary = i == 0 || matches!(prev_byte, b'_' | b'-' | b'.' | b'/');
+            let is_word_boundary = index == 0 || matches!(prev_byte, b'_' | b'-' | b'.' | b'/');
             if is_word_boundary {
                 match_score += 5;
             }
@@ -69,13 +111,13 @@ pub fn fuzzy_score(needle_lower: &[u8], haystack: &[u8]) -> Option<i32> {
             needle_idx += 1;
             prev_matched = true;
 
-            if needle_idx == needle_lower.len() {
+            if needle_idx == needle.len() {
                 return Some(score);
             }
         } else {
             prev_matched = false;
         }
-        prev_byte = b;
+        prev_byte = byte;
     }
 
     None
@@ -83,11 +125,22 @@ pub fn fuzzy_score(needle_lower: &[u8], haystack: &[u8]) -> Option<i32> {
 
 enum PatternMatcher {
     MatchAll,
-    SubstringCaseSensitive { finder: Finder<'static> },
-    SubstringCaseInsensitive { needle_lower: Vec<u8> },
-    ExactCaseSensitive { target: Vec<u8> },
-    ExactCaseInsensitive { target_lower: Vec<u8> },
-    Fuzzy { needle_lower: Vec<u8> },
+    SubstringCaseSensitive {
+        finder: Finder<'static>,
+    },
+    SubstringCaseInsensitive {
+        needle_lower: Vec<u8>,
+    },
+    ExactCaseSensitive {
+        target: Vec<u8>,
+    },
+    ExactCaseInsensitive {
+        target_lower: Vec<u8>,
+    },
+    Fuzzy {
+        needle: Vec<u8>,
+        case_sensitive: bool,
+    },
     Glob(GlobMatcher),
     Regex(Regex),
 }
@@ -130,7 +183,12 @@ impl Matcher {
                     }
                 } else if cli.fuzzy {
                     PatternMatcher::Fuzzy {
-                        needle_lower: pattern.to_lowercase().into_bytes(),
+                        needle: if cli.case_sensitive {
+                            pattern.as_bytes().to_vec()
+                        } else {
+                            pattern.to_lowercase().into_bytes()
+                        },
+                        case_sensitive: cli.case_sensitive,
                     }
                 } else if cli.case_sensitive {
                     let static_needle: &'static [u8] =
@@ -226,9 +284,18 @@ impl Matcher {
                     None
                 }
             }
-            PatternMatcher::Fuzzy { needle_lower } => {
-                let folded = fold_lower(name_bytes);
-                fuzzy_score(needle_lower, &folded)
+            PatternMatcher::Fuzzy {
+                needle,
+                case_sensitive,
+            } => {
+                if *case_sensitive {
+                    fuzzy_score_case_sensitive(needle, name_bytes)
+                } else if has_non_ascii(name_bytes) {
+                    let folded = fold_lower(name_bytes);
+                    fuzzy_score(needle, &folded)
+                } else {
+                    fuzzy_score(needle, name_bytes)
+                }
             }
             PatternMatcher::Glob(glob) => {
                 let os_str = OsStr::from_bytes(name_bytes);
@@ -256,7 +323,6 @@ enum ContentFinder {
     },
     CaseInsensitive {
         needle_lower: Vec<u8>,
-        carries_utf8: bool,
     },
 }
 
@@ -275,7 +341,6 @@ impl ContentMatcher {
             Self {
                 finder: ContentFinder::CaseInsensitive {
                     needle_lower: needle.to_lowercase().into_bytes(),
-                    carries_utf8: has_non_ascii(needle.as_bytes()),
                 },
             }
         }
@@ -286,30 +351,40 @@ impl ContentMatcher {
             return false;
         };
 
-        let (needle_len, carries_utf8) = match &self.finder {
-            ContentFinder::CaseSensitive { needle_len, .. } => (*needle_len, false),
-            ContentFinder::CaseInsensitive {
-                needle_lower,
-                carries_utf8,
-            } => (needle_lower.len(), *carries_utf8),
+        let (needle_len, case_sensitive) = match &self.finder {
+            ContentFinder::CaseSensitive { needle_len, .. } => (*needle_len, true),
+            ContentFinder::CaseInsensitive { needle_lower } => (needle_lower.len(), false),
         };
 
         if needle_len == 0 {
             return true;
         }
 
-        let mut overlap = 0;
-        let max_overlap = if carries_utf8 {
-            needle_len + 3
+        let buffer_len = read_buf.len();
+        let required_len = if case_sensitive {
+            needle_len + 1
         } else {
+            needle_len + 4
+        };
+        let mut expanded_buf =
+            (buffer_len < required_len).then(|| vec![0u8; required_len + buffer_len]);
+        let read_buf = match &mut expanded_buf {
+            Some(buffer) => buffer.as_mut_slice(),
+            None => read_buf,
+        };
+        let max_overlap = if case_sensitive {
             needle_len - 1
+        } else {
+            needle_len + 3
         }
         .min(read_buf.len().saturating_sub(1));
+        let mut overlap = 0;
 
         loop {
             let chunk_start = overlap;
-            let Ok(n) = file.read(&mut read_buf[chunk_start..]) else {
-                return false;
+            let n = match read_retry(&mut file, &mut read_buf[chunk_start..]) {
+                Ok(n) => n,
+                Err(_) => return false,
             };
 
             if n == 0 {
@@ -318,23 +393,13 @@ impl ContentMatcher {
 
             let total_valid = chunk_start + n;
             let window = &read_buf[..total_valid];
+            let unicode_window = !case_sensitive && has_non_ascii(window);
 
             let matched = match &self.finder {
                 ContentFinder::CaseSensitive { finder, .. } => finder.find(window).is_some(),
-                ContentFinder::CaseInsensitive {
-                    needle_lower,
-                    carries_utf8,
-                } => {
-                    if *carries_utf8 {
-                        lower_buf.clear();
-                        lower_buf
-                            .extend(String::from_utf8_lossy(window).to_lowercase().into_bytes());
-                    } else {
-                        lower_buf.resize(total_valid, 0);
-                        for (i, &b) in window.iter().enumerate() {
-                            lower_buf[i] = b.to_ascii_lowercase();
-                        }
-                    }
+                ContentFinder::CaseInsensitive { needle_lower } => {
+                    lower_buf.clear();
+                    lower_buf.extend_from_slice(fold_lower(window).as_ref());
                     memchr::memmem::find(lower_buf, needle_lower).is_some()
                 }
             };
@@ -347,9 +412,11 @@ impl ContentMatcher {
                 overlap = total_valid;
             } else {
                 let mut seam = total_valid - max_overlap;
-                if carries_utf8 {
-                    while seam > 0 && (read_buf[seam] & 0xC0) == 0x80 {
-                        seam -= 1;
+                if unicode_window {
+                    for _ in 0..3 {
+                        if seam > 0 && (read_buf[seam] & 0xC0) == 0x80 {
+                            seam -= 1;
+                        }
                     }
                 }
                 read_buf.copy_within(seam..total_valid, 0);
@@ -510,6 +577,27 @@ mod tests {
                 .matches("мыло.txt".as_bytes(), RawType::File)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn test_case_sensitive_fuzzy() {
+        let mut cli = base_cli();
+        cli.fuzzy = true;
+        cli.case_sensitive = true;
+        cli.pattern = Some("foo".into());
+        let matcher = Matcher::from_cli(&cli).unwrap();
+        assert!(matcher.matches(b"foo.txt", RawType::File).is_some());
+        assert!(matcher.matches(b"Foo.txt", RawType::File).is_none());
+    }
+
+    #[test]
+    fn test_invalid_name_bytes_do_not_match_replacement_character() {
+        let mut cli = base_cli();
+        cli.exact = true;
+        cli.pattern = Some("�".into());
+        let matcher = Matcher::from_cli(&cli).unwrap();
+        assert!(matcher.matches("�".as_bytes(), RawType::File).is_some());
+        assert!(matcher.matches(b"\xff", RawType::File).is_none());
     }
 
     #[test]
@@ -724,6 +812,50 @@ mod tests {
         let mut lower_buf = Vec::new();
 
         assert!(matcher.matches_file(&test_file, &mut small_read_buf, &mut lower_buf));
+
+        let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn test_content_matcher_ascii_needle_uses_unicode_case_folding() {
+        let test_file = std::env::temp_dir().join("ffind_content_test_ascii_unicode.txt");
+        std::fs::write(&test_file, "K").unwrap();
+        let matcher = ContentMatcher::new("k", false);
+        let case_sensitive = ContentMatcher::new("k", true);
+        let mut read_buf = [0u8; 2];
+        let mut lower_buf = Vec::new();
+
+        assert!(matcher.matches_file(&test_file, &mut read_buf, &mut lower_buf));
+        assert!(!case_sensitive.matches_file(&test_file, &mut read_buf, &mut lower_buf));
+
+        let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn test_content_matcher_needle_larger_than_read_buffer() {
+        let test_file = std::env::temp_dir().join("ffind_content_test_long_needle.txt");
+        let needle = "a".repeat(70_000);
+        std::fs::write(&test_file, &needle).unwrap();
+        let case_insensitive = ContentMatcher::new(&needle, false);
+        let case_sensitive = ContentMatcher::new(&needle, true);
+        let mut read_buf = [0u8; 64];
+        let mut lower_buf = Vec::new();
+
+        assert!(case_insensitive.matches_file(&test_file, &mut read_buf, &mut lower_buf));
+        assert!(case_sensitive.matches_file(&test_file, &mut read_buf, &mut lower_buf));
+
+        let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn test_content_matcher_preserves_invalid_bytes() {
+        let test_file = std::env::temp_dir().join("ffind_content_test_invalid_bytes.bin");
+        std::fs::write(&test_file, [0xff]).unwrap();
+        let matcher = ContentMatcher::new("�", false);
+        let mut read_buf = [0u8; 8];
+        let mut lower_buf = Vec::new();
+
+        assert!(!matcher.matches_file(&test_file, &mut read_buf, &mut lower_buf));
 
         let _ = std::fs::remove_file(test_file);
     }

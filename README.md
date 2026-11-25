@@ -149,6 +149,8 @@ different search root, pass `.`, `..`, `/`, or any path containing a `/`
 | `-r, --regex` | Regular expression match | `ffind -r "^[a-z_]+\.rs$"` |
 | `-C, --contains <TEXT>` | Search file contents (SIMD accelerated) | `ffind -C "TODO"` |
 
+The `-x/--exact`, `-g/--glob`, `-r/--regex`, and `-z/--fuzzy` modes are mutually exclusive.
+
 ### Filtering
 
 | Flag | Description | Example |
@@ -184,7 +186,7 @@ different search root, pass `.`, `..`, `/`, or any path containing a `/`
 | `--limit <NUM>` | Limit number of results. Stops traversal early in streaming mode; with `--sort`, `--exec-batch` or `--tree` the tree is walked fully and results are cut after sorting/collection. `-z/--fuzzy` implies score sorting, so it also collects |
 | `-j, --threads <NUM>` | Set number of worker threads (default: available CPU cores; valid range 1-1024) |
 | `-0, --print0` | Delimit results with a null byte (for `xargs -0`) |
-| `--color <auto\|always\|never>` | Control colored output (auto colors only when stdout is a TTY) |
+| `--color <auto\|always\|never>` | Control colored output (`auto` colors only on a TTY and when `NO_COLOR` is unset) |
 | `--tree` | Print matches as a minimal Unicode tree (mutually exclusive with `--json`, `-l`, `-0`, `-X`, `--exec-batch`). Collects all matches in memory like `--sort`, so streaming is disabled |
 | `--time` | Measure execution time and matched count (outputs to `stderr`) |
 | `-X, --exec <CMD>...` | Execute command for each match individually (placeholders: `{}` full path, `{/}` file name, `{//}` parent dir, `{/.}` file stem). Conflicting output flags: `--json`, `-l`, `-0`, `--lines` |
@@ -212,9 +214,9 @@ ffind -a main.rs
 
 # JSON streaming output
 ffind --json -m 1 Cargo.toml
-# {"path":"./Cargo.toml","type":"file","size":506,"mtime":1794768968,"mode":33188,"is_exec":false}
+# {"path":"./Cargo.toml","type":"file","size":506,"mtime":1794768968,"mode":33188,"is_exec":false,"uid":1000}
 
-# Metadata filters (--size, --owner, ...) also include the file owner in JSON
+# JSON also exposes the file owner through the uid field
 ffind --json --owner root -m 1 /etc/hostname
 # {"path":"/etc/hostname","type":"file","size":13,"mtime":1699999999,"mode":33188,"is_exec":false,"uid":0}
 ```
